@@ -31,15 +31,15 @@ let me=null;                      // {email,name,role} or null = public viewer
 let appReady=false;
 let sPub=null,sPrice=null;
 let settings=mergeSettings(null);
-let sessions=[],billing={},contacts={},staffList=[];
+let sessions=[],billing={},contacts={},staffList=[],pstat={};
 let recovering=false;
 let loaded=false,tab='dash',entry=null,lastArea='trampoline',bulk=[];
 let remindAt={},muted={},lastAlertKey='',lastOverSig='';
 let soundOn=true,audio=null;
-let unsubs=[],unsubG=null,unsubB=null,unsubC=null;
+let unsubs=[],unsubG=null,unsubB=null,unsubC=null,unsubP=null;
 let loadDays=30;
 const banners={};
-const freshF=()=>({q:'',range:'today',from:'',to:'',area:'all',ctype:'all',card:'all',socks:'all',bday:'all',pay:'all',status:'all'});
+const freshF=()=>({q:'',range:'today',from:'',to:'',area:'all',ctype:'all',card:'all',socks:'all',bday:'all',pay:'all',pstat:'all',status:'all'});
 const FS={dash:freshF(),completed:freshF(),cancelled:freshF(),history:freshF(),stats:freshF()};
 const isAdmin=()=>!!me&&me.role==='admin';
 const isStaffUp=()=>!!me;
@@ -77,9 +77,16 @@ function toast(msg,bad){const t=document.createElement('div');t.className='toast
 const isOver=(s,now)=>s.status==='active'&&endOf(s)<=(now||Date.now());
 const bl=s=>billing[s.id]||{};
 const dueOf=s=>{const b=bl(s);return (b.total||0)+(b.extTotal||0)+(b.adjust||0)};
-const cashOf=s=>bl(s).cash||0, upiOf=s=>bl(s).upi||0, cardOf=s=>bl(s).cardAmt||0;
-const paidOf=s=>cashOf(s)+upiOf(s)+cardOf(s);
+const paidOf=s=>Math.min(dueOf(s),bl(s).paidAmount||0);          // amount received so far
+const owedOf=s=>Math.max(0,dueOf(s)-paidOf(s));                  // amount still due
 const discOf=s=>bl(s).discount||0;
+const statusOf=(bill,rec)=>bill<=0?'paid':rec>=bill?'paid':rec<=0?'pending':'partial';
+const STATUS_LABEL={pending:'Pending',partial:'Pending',paid:'Paid'};
+function payInfo(s){
+if(isAdmin()){if(!billing[s.id])return null;const bill=dueOf(s),rec=paidOf(s);return {bill,rec,due:Math.max(0,bill-rec),status:statusOf(bill,rec)}}
+if(me){const p=pstat[s.id];return p?{bill:p.due,rec:null,due:Math.max(0,p.balance),status:p.status}:null}
+return null;
+}
 const phoneOf=s=>contacts[s.id]||'';
 const sinceMs=()=>loadDays>0?startOfDay(Date.now())-(loadDays-1)*86400000:0;
 function toLocalInput(ms){const d=new Date(ms),p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())}
@@ -100,10 +107,10 @@ const freeN=(e.card==='Premium'&&e.bday)?1:0;
 const play=fee*Math.max(0,n-freeN);
 const sockUnit=e.socks!=='No socks'?(settings.sockPrices[e.socks]||0):0,sock=sockUnit*n;
 const cardFee=e.ctype==='new'?(settings.cardPrices[e.card]||0):0;
-const base=play+sock;let disc=0;
-if(dc.t==='pct')disc=Math.round(base*Math.min(100,Math.max(0,dc.v))/100);
-else if(dc.t==='amt')disc=Math.min(base,Math.max(0,Math.round(dc.v)));
-return {n,fee,freeN,play,sockUnit,sock,card:cardFee,discount:disc,total:base-disc+cardFee};
+let disc=0;   // discounts apply to play time only (never to socks or the card price)
+if(dc.t==='pct')disc=Math.round(play*Math.min(100,Math.max(0,dc.v))/100);
+else if(dc.t==='amt')disc=Math.min(play,Math.max(0,Math.round(dc.v)));
+return {n,fee,freeN,play,sockUnit,sock,card:cardFee,discount:disc,total:play-disc+sock+cardFee};
 }
 const extPrice=(s,min)=>Math.round((playFee(s.area,s.card,60)||0)/60*min/5)*5*(s.players||1);
 async function makeSupabaseBackend(cfg,hooks,modOverride){
@@ -129,10 +136,10 @@ const o={};Object.keys(r).forEach(k=>{o[GREV[k]||k]=r[k]});
 ['ticket','players','baseMin','durationMin','startAt','endedAt','cancelledAt','editedAt'].forEach(k=>{if(o[k]!=null)o[k]=Number(o[k])});
 return o;
 };
-const BMAP={startAt:'start_at',discType:'disc_type',discVal:'disc_val',cardAmt:'card_amt',paidAt:'paid_at',extTotal:'ext_total',extList:'ext_list'};
+const BMAP={startAt:'start_at',discType:'disc_type',discVal:'disc_val',paidAmount:'paid_amount',paidAt:'paid_at',paidBy:'paid_by',extTotal:'ext_total',extList:'ext_list'};
 const toBill=o=>{const r={};Object.keys(o).forEach(k=>{if(o[k]!==undefined)r[BMAP[k]||k]=o[k]});return r};
 const fromBill=r=>({startAt:Number(r.start_at),play:Number(r.play),socks:Number(r.socks),card:Number(r.card),discount:Number(r.discount),discType:r.disc_type,discVal:Number(r.disc_val),
-total:Number(r.total),extTotal:Number(r.ext_total),adjust:Number(r.adjust),cash:Number(r.cash),upi:Number(r.upi),cardAmt:Number(r.card_amt),paidAt:r.paid_at,extList:r.ext_list||[]});
+total:Number(r.total),extTotal:Number(r.ext_total),adjust:Number(r.adjust),paidAmount:Number(r.paid_amount),paidAt:r.paid_at,paidBy:r.paid_by,extList:r.ext_list||[]});
 const fromStaff=r=>({name:r.name,email:r.email,role:r.role,active:r.active,createdAt:Number(r.created_at)});
 function live(table,pk,loadRows,toKV,emit,err){
 const store=new Map();let alive=true,pend=null,first=true,hiddenAt=0;
@@ -219,6 +226,9 @@ subGuests:(since,cb,err)=>live('guests','id',()=>fetchAll(()=>client.from('guest
 r=>[r.id,fromRowG(r)],st=>cb(Array.from(st.values())),err),
 subContacts:(since,cb,err)=>live('contacts','id',()=>fetchAll(()=>client.from('contacts').select('id,phone').gte('start_at',since||0).order('id')),
 r=>[r.id,r.phone||''],st=>cb(Object.fromEntries(st)),err),
+subPayStatus:(since,cb,err)=>live('payment_status','id',()=>fetchAll(()=>client.from('payment_status').select('*').gte('start_at',since||0).order('id')),
+r=>[r.id,{due:Number(r.due),balance:Number(r.balance),status:r.status}],st=>cb(Object.fromEntries(st)),err),
+setPaid:async(id,paid,by)=>{await ok(client.rpc('billing_set_paid',{p_id:id,p_paid:!!paid,p_by:by||''}))},
 subBilling:(since,cb,err)=>live('billing','id',()=>fetchAll(()=>client.from('billing').select('*').gte('start_at',since||0).order('id')),
 r=>[r.id,fromBill(r)],st=>cb(Object.fromEntries(st)),err),
 createGuest:async s=>{await ok(client.from('guests').insert(toRowG(s)))},
@@ -241,7 +251,7 @@ if(o.startAt!==undefined)row.start_at=o.startAt;
 await ok(client.from('contacts').upsert(row,{onConflict:'id'}));
 },
 createBilling:async(id,o)=>{
-await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,cash:o.cash,upi:o.upi,card_amt:o.cardAmt}}));
+await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,paid:!!o.paid,paid_by:o.paidBy}}));
 },
 setBilling:async(id,o)=>{await ok(client.from('billing').upsert(Object.assign({id},toBill(o)),{onConflict:'id'}))},
 addExtBilling:async(id,price,min)=>{await ok(client.rpc('billing_add_ext',{p_id:id,p_price:price,p_min:min}))},
@@ -341,7 +351,7 @@ if(me){$('#userName').textContent=me.name;$('#userRole').textContent=isAdmin()?'
 Object.assign(FS,{dash:freshF(),completed:freshF(),cancelled:freshF(),history:freshF(),stats:freshF()});
 loadDays=Number(lsGet(me?'ufh4_win':'ufh4_win_pub')||0)||(me?30:7);
 if(B.kind==='demo')demoBanner();
-loaded=false;sessions=[];billing={};contacts={};
+loaded=false;sessions=[];billing={};contacts={};pstat={};
 startSubs();switchTab(ADMIN_TABS.includes(tab)?'dash':tab);
 }
 $('#signOutBtn').addEventListener('click',()=>B.signOut());
@@ -362,14 +372,15 @@ toast('Live connection problem'+(c?' ('+c+')':'')+'.',true);
 }
 function stopSubs(){
 unsubs.forEach(f=>{try{f()}catch(e){}});unsubs=[];
-[unsubG,unsubB,unsubC].forEach(f=>{if(f){try{f()}catch(e){}}});unsubG=unsubB=unsubC=null;
+[unsubG,unsubB,unsubC,unsubP].forEach(f=>{if(f){try{f()}catch(e){}}});unsubG=unsubB=unsubC=unsubP=null;
 }
 function rebuildSettings(){settings=mergeSettings(Object.assign({},sPub||{},sPrice||{}));applySettings();if(tab!=='settings')renderAll()}
 function startGuestSubs(){
-[unsubG,unsubB,unsubC].forEach(f=>{if(f){try{f()}catch(e){}}});unsubG=unsubB=unsubC=null;
+[unsubG,unsubB,unsubC,unsubP].forEach(f=>{if(f){try{f()}catch(e){}}});unsubG=unsubB=unsubC=unsubP=null;
 unsubG=B.subGuests(sinceMs(),list=>{sessions=list.map(norm);loaded=true;setBanner('perm','');renderAll()},subErr);
 if(me)unsubC=B.subContacts(sinceMs(),m=>{contacts=m;renderAll()},subErr);
 if(isAdmin())unsubB=B.subBilling(sinceMs(),b=>{billing=b;renderAll()},subErr);
+if(me&&!isAdmin())unsubP=B.subPayStatus(sinceMs(),m=>{pstat=m;renderAll()},subErr);
 }
 function startSubs(){
 unsubs.push(B.subSettings(s=>{sPub=s;rebuildSettings()},subErr));
@@ -377,7 +388,7 @@ if(me)unsubs.push(B.subPricing(p=>{sPrice=p;rebuildSettings()},subErr));
 if(isAdmin())unsubs.push(B.subStaff(l=>{staffList=l;if(tab==='team')renderTeam()},subErr));
 startGuestSubs();
 }
-function setWindow(days){loadDays=days;lsSet(me?'ufh4_win':'ufh4_win_pub',String(days));loaded=false;sessions=[];billing={};contacts={};startGuestSubs();renderAll()}
+function setWindow(days){loadDays=days;lsSet(me?'ufh4_win':'ufh4_win_pub',String(days));loaded=false;sessions=[];billing={};contacts={};pstat={};startGuestSubs();renderAll()}
 window.addEventListener('offline',()=>setBanner('net','You are offline. New entries are kept on this device and will sync when the internet returns.'));
 window.addEventListener('online',()=>setBanner('net',''));
 document.addEventListener('pointerdown',()=>{
@@ -438,10 +449,10 @@ ctype:['Customer',[['all','New & existing'],['new','New'],['existing','Existing'
 card:['Card',[['all','Any card'],['Basic','Basic'],['Premium','Premium']]],
 socks:['Socks',[['all','Any socks'],['S','S'],['M','M'],['L','L'],['No socks','No socks']]],
 bday:['Birthday free play',[['all','Any'],['yes','Yes'],['no','No']]],
-pay:['Payment received',[['all','Any'],['Cash','Cash'],['UPI','UPI'],['Card','Card'],['unpaid','Not paid yet']]],
+pstat:['Payment',[['all','Any'],['pending','Pending'],['paid','Paid']]],
 status:['Status',[['all','All'],['active','Playing'],['over','Time up'],['completed','Completed'],['cancelled','Cancelled']]]
 };
-const baseKeys=()=>['range','area','ctype','card','socks','bday'].concat(isAdmin()?['pay']:[]);
+const baseKeys=()=>['range','area','ctype','card','socks','bday'].concat(me?['pstat']:[]);
 const WIN_ALL=[[1,'Today only'],[7,'Last 7 days'],[30,'Last 30 days'],[90,'Last 90 days'],[365,'Last year'],[0,'Everything']];
 const winOpts=()=>me?WIN_ALL.filter(x=>x[0]>=7||x[0]===0):WIN_ALL.filter(x=>x[0]===7||x[0]===30);
 function bounds(st){
@@ -465,10 +476,7 @@ if(st.card!=='all'&&s.card!==st.card)return false;
 if(st.socks!=='all'&&s.socks!==st.socks)return false;
 if(st.bday==='yes'&&!s.bday)return false;
 if(st.bday==='no'&&s.bday)return false;
-if(st.pay!=='all'&&isAdmin()){
-if(st.pay==='unpaid'){if(paidOf(s)>0)return false}
-else{const m={Cash:cashOf(s),UPI:upiOf(s),Card:cardOf(s)};if(!(m[st.pay]>0))return false}
-}
+if(st.pstat!=='all'&&me){const pi=payInfo(s);if(!pi)return false;if((pi.status==='paid'?'paid':'pending')!==st.pstat)return false}
 if(!o.skipStatus&&st.status!=='all'){
 if(st.status==='over'){if(!isOver(s))return false}
 else if(st.status==='active'){if(s.status!=='active'||isOver(s))return false}
@@ -523,7 +531,8 @@ const facts=[`<span class="fact">${esc(ticketStr(s.ticket))}</span>`,`<span clas
 `<span class="fact ${s.ctype==='new'?'nw':''}">${s.ctype==='new'?'New customer':'Existing'}</span>`,`<span class="fact">${esc(s.card)} card</span>`,
 `<span class="fact">Socks: ${esc(s.socks)}</span>`];
 if(s.bday)facts.push('<span class="fact hl">Birthday free play</span>');
-if(isAdmin()){const due=dueOf(s),paid=paidOf(s);facts.push(`<span class="fact ${paid>=due&&due>0?'':'nw'}">${due>0&&paid>=due?'Paid':'Balance '+esc(money(due-paid))}</span>`)}
+const pi=payInfo(s);
+if(pi)facts.push(`<span class="fact pay-${pi.status}">${STATUS_LABEL[pi.status]}${pi.status!=='paid'?' \u00B7 Due '+esc(money(pi.due)):''}</span>`);
 const ph=phoneOf(s);
 return `<article class="guest" data-id="${esc(s.id)}" data-area="${esc(s.area)}" data-start="${s.startAt}" data-end="${endOf(s)}" data-state="ok">
 <div class="g-top"><div><span class="areatag">${esc(AREAS[s.area].label)}</span><h3>${esc(s.name)}</h3>
@@ -531,7 +540,7 @@ return `<article class="guest" data-id="${esc(s.id)}" data-area="${esc(s.area)}"
 <div class="timer">--:--</div><div class="track"><span></span></div>
 <div class="facts">${facts.join('')}</div>
 ${s.remark?`<p class="remark">\u201C${esc(s.remark)}\u201D</p>`:''}
-<div class="g-actions"><button class="btn ghost" data-act="extend" data-write>Add time</button><button class="btn ghost" data-act="edit" data-write>Edit</button><button class="btn ghost adm" data-act="pay" data-write>Payment</button><button class="btn ghost" data-act="cancel" data-write>Cancel</button><button class="btn primary" data-act="out" data-write>Mark out</button></div></article>`;
+<div class="g-actions"><button class="btn ghost" data-act="extend" data-write>Add time</button><button class="btn ghost" data-act="edit" data-write>Edit</button><button class="btn ghost" data-act="pay" data-write>Payment</button><button class="btn ghost" data-act="cancel" data-write>Cancel</button><button class="btn primary" data-act="out" data-write>Mark out</button></div></article>`;
 }
 const cp=(title,rows)=>`<div class="cp"><h3>${esc(title)}</h3>${rows.map(r=>`<div class="row"><span>${esc(r[0])}</span><span><b>${r[1]}</b>${r[2]?`<i>${esc(r[2])}</i>`:''}</span></div>`).join('')}</div>`;
 function renderDash(){
@@ -547,7 +556,7 @@ $('#statusTiles').innerHTML=
 `<div class="tile" style="--tc:var(--over)"><span>Overtime</span><b>${over.length}</b><small>waiting to be marked out</small></div>`+
 `<div class="tile" style="--tc:var(--ok)"><span>Completed</span><b>${compl}</b><small>in this date range</small></div>`+
 `<div class="tile" style="--tc:var(--muted)"><span>Cancelled</span><b>${canc}</b><small>in this date range</small></div>`+
-`<div class="tile" style="--tc:var(--yellow)"><span>Total check-ins</span><b>${nc.length}</b><small>${sum(nc,s=>s.players)} players</small></div>`;
+`<div class="tile" style="--tc:var(--yellow-ink)"><span>Total check-ins</span><b>${nc.length}</b><small>${sum(nc,s=>s.players)} players</small></div>`;
 const cnt=(arr,f)=>arr.filter(f).length,pl=(arr,f)=>sum(arr.filter(f),s=>s.players);
 const tb=s=>s.baseMin||s.durationMin;
 $('#countGrid').innerHTML=
@@ -556,6 +565,7 @@ cp('Play area',AREA_KEYS.map(a=>[AREAS[a].label,cnt(nc,s=>s.area===a),pl(nc,s=>s
 cp('Socks size (players)',SOCKS.map(k=>[k==='No socks'?'No socks':'Size '+k,pl(nc,s=>s.socks===k)]))+
 cp('Card type',CARDS.map(c=>[c+' card',cnt(nc,s=>s.card===c)]))+
 cp('Birthday free play',[['Yes',cnt(nc,s=>s.bday)],['No (Premium card)',cnt(nc,s=>s.card==='Premium'&&!s.bday)],['No (Basic card)',cnt(nc,s=>s.card==='Basic')]])+
+(me?cp('Payment',[['Pending',cnt(nc,s=>{const p=payInfo(s);return !!p&&p.status!=='paid'})],['Paid',cnt(nc,s=>{const p=payInfo(s);return !!p&&p.status==='paid'})]]):'')+
 cp('Time booked',[['30 min',cnt(nc,s=>tb(s)===30)],['1 hour',cnt(nc,s=>tb(s)===60)],['2 hours',cnt(nc,s=>tb(s)===120)],['Custom',cnt(nc,s=>[30,60,120].indexOf(tb(s))<0)]]);
 $('#runLabel').textContent=running.length+' running';
 const box=$('#guests');
@@ -656,7 +666,7 @@ openDlg(`<h2>Edit ${esc(ticketStr(s.ticket))}</h2><p class="sub-line">Change any
 <div class="two"><label class="field"><span>Card</span><select id="eeCard">${opts(CARDS,s.card)}</select></label>
 <label class="field"><span>Socks size</span><select id="eeSock">${opts(SOCKS,s.socks)}</select></label></div>
 <label class="field"><span>Birthday free play</span><select id="eeBday"><option value="no"${s.bday?'':' selected'}>No</option><option value="yes"${s.bday?' selected':''}>Yes</option></select></label>
-<div class="lbl" style="margin-top:4px;color:var(--yellow)">Time</div>
+<div class="lbl" style="margin-top:4px;color:var(--yellow-ink)">Time</div>
 <div class="two"><label class="field"><span>Check-in time</span><input id="eeIn" type="datetime-local" value="${toLocalInput(s.startAt)}"></label>
 <label class="field"><span>Booked time (minutes)</span><input id="eeMin" type="number" min="5" step="5" value="${s.durationMin}"></label></div>
 ${s.status==='completed'?`<label class="field"><span>Check-out time</span><input id="eeOut" type="datetime-local" value="${toLocalInput(s.endedAt||s.startAt)}"></label>`:''}
@@ -685,51 +695,62 @@ $('#dNo').onclick=closeDlg;
 $('#dOk').onclick=()=>{B.deleteGuest(id).catch(writeErr);B.deleteBilling(id).catch(()=>{});B.deleteContact(id).catch(()=>{});closeDlg();toast('Record deleted.')};
 }
 function openPayment(id){
-const s=getS(id);if(!s||!isAdmin())return;
-const b=bl(s),base=(b.play||0)+(b.socks||0),cardFee=b.card||0,ext=b.extTotal||0;
+const s=getS(id);if(!s||!me)return;
+const pi=payInfo(s);
+if(!pi){toast('Payment details are still loading. Try again in a moment.',true);return}
+const adm=isAdmin(),b=adm?bl(s):{};
+const base=b.play||0,other=(b.socks||0)+(b.card||0),ext=b.extTotal||0;
 const P={disc:b.discType==='amt'?'custom':b.discType==='pct'?([5,10,15,20].indexOf(Number(b.discVal))>=0?String(Number(b.discVal)):'custom'):'none',
-dcType:b.discType==='amt'?'amt':'pct',dcVal:b.discVal||0};
+dcType:b.discType==='amt'?'amt':'pct',dcVal:b.discVal||0,pay:pi.status==='paid'?'paid':'pending',touched:false};
 openDlg(`<h2>Payment: ${esc(s.name)}</h2><p class="sub-line">${esc(ticketStr(s.ticket))} \u00B7 ${s.players} player${s.players>1?'s':''} \u00B7 ${esc(AREAS[s.area].label)}</p>
 <div class="bill" id="pBill"></div>
-<div class="lbl">Discount</div>
+${adm?`<div class="lbl">Discount (play time only)</div>
 <div class="chips">${['none','5','10','15','20','custom'].map(v=>`<button type="button" class="chip" data-pd="${v}">${v==='none'?'No discount':v==='custom'?'Custom':v+'%'}</button>`).join('')}</div>
 <div class="two" id="pCustom" hidden><label class="field"><span>Custom discount</span><input id="pDcVal" type="number" min="0" step="1" value="${P.dcVal}"></label>
 <label class="field"><span>Type</span><select id="pDcType"><option value="pct"${P.dcType==='pct'?' selected':''}>Percent (%)</option><option value="amt"${P.dcType==='amt'?' selected':''}>Amount (${esc(settings.currency)})</option></select></label></div>
-<label class="field"><span>Adjustment (${esc(settings.currency)}, can be negative)</span><input id="pAdj" type="number" step="1" value="${b.adjust||0}"></label>
-<div class="lbl" style="color:var(--yellow)">Money received</div>
-<div class="paygrid"><label class="field"><span>Cash</span><input id="pCash" type="number" min="0" step="1" value="${b.cash||0}"></label>
-<label class="field"><span>UPI</span><input id="pUpi" type="number" min="0" step="1" value="${b.upi||0}"></label>
-<label class="field"><span>Card</span><input id="pCard" type="number" min="0" step="1" value="${b.cardAmt||0}"></label></div>
-<div class="acts" style="margin-bottom:10px"><button class="mini" data-fill="cash">Cash = balance</button><button class="mini" data-fill="upi">UPI = balance</button><button class="mini" data-fill="card">Card = balance</button></div>
-<div class="bill" id="pTot"></div>
-<div class="dlg-actions"><button class="btn ghost" id="pNo">Cancel</button><button class="btn primary" id="pOk">Save payment</button></div>`);
+<label class="field"><span>Adjustment (${esc(settings.currency)}, can be negative)</span><input id="pAdj" type="number" step="1" value="${b.adjust||0}"></label>`:''}
+<div class="lbl" style="color:var(--yellow-ink)">Payment received</div>
+<div class="chips"><button type="button" class="chip" data-pp="pending">Pending</button><button type="button" class="chip" data-pp="paid">Paid</button></div>
+${pi.status==='partial'?`<p class="hint" style="margin:0 0 10px">Part of the bill was received earlier. Choose Paid when the rest has been received.</p>`:''}
+<div class="dlg-actions"><button class="btn ghost" id="pNo">Cancel</button><button class="btn primary" id="pOk">Save</button></div>`);
 const dcn=()=>P.disc==='none'?{t:'none',v:0}:P.disc==='custom'?{t:$('#pDcType').value==='amt'?'amt':'pct',v:num($('#pDcVal').value)}:{t:'pct',v:Number(P.disc)};
 const discAmt=()=>{const d=dcn();return d.t==='pct'?Math.round(base*Math.min(100,d.v)/100):d.t==='amt'?Math.min(base,Math.round(d.v)):0};
 const calc=()=>{
-const d=discAmt(),adj=Number($('#pAdj').value)||0,total=base-d+cardFee,due=total+ext+adj,paid=num($('#pCash').value)+num($('#pUpi').value)+num($('#pCard').value);
+let bill=pi.bill,d=0,adj=0,total=0;
+if(adm){d=discAmt();adj=Number($('#pAdj').value)||0;total=base-d+other;bill=total+ext+adj}
+const already=adm?Math.min(bill,b.paidAmount||0):Math.min(pi.bill,pi.bill-pi.due);
+const after=!P.touched?Math.max(0,bill-already):P.pay==='paid'?0:bill;
+$$('#dlgBody [data-pp]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.pp===P.pay)));
+if(adm){
 $$('#dlgBody [data-pd]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.pd===P.disc)));
 $('#pCustom').hidden=P.disc!=='custom';
 $('#pBill').innerHTML=`<div class="r"><span>Play fees</span><b>${money(b.play||0)}</b></div><div class="r"><span>Socks</span><b>${money(b.socks||0)}</b></div>`+
-(cardFee?`<div class="r"><span>Card (new customer)</span><b>${money(cardFee)}</b></div>`:'')+(ext?`<div class="r"><span>Extra time</span><b>${money(ext)}</b></div>`:'')+
-(d?`<div class="r"><span>Discount</span><b>\u2212${money(d)}</b></div>`:'')+(adj?`<div class="r"><span>Adjustment</span><b>${money(adj)}</b></div>`:'')+
-`<div class="r tot"><span>Amount due</span><b>${money(due)}</b></div>`;
-$('#pTot').innerHTML=`<div class="r"><span>Cash</span><b>${money(num($('#pCash').value))}</b></div><div class="r"><span>UPI</span><b>${money(num($('#pUpi').value))}</b></div><div class="r"><span>Card</span><b>${money(num($('#pCard').value))}</b></div>`+
-`<div class="r tot"><span>Total received (combined)</span><b>${money(paid)}</b></div><div class="r"><span>Balance</span><b>${money(due-paid)}</b></div>`;
-return {d,adj,total,due,paid};
+(b.card?`<div class="r"><span>Card (new customer)</span><b>${money(b.card)}</b></div>`:'')+(ext?`<div class="r"><span>Extra time</span><b>${money(ext)}</b></div>`:'')+
+(d?`<div class="r"><span>Discount on play time</span><b>\u2212${money(d)}</b></div>`:'')+(adj?`<div class="r"><span>Adjustment</span><b>${money(adj)}</b></div>`:'')+
+`<div class="r tot"><span>Bill amount</span><b>${money(bill)}</b></div><div class="r"><span>Amount due after saving</span><b>${money(after)}</b></div>`;
+}else{
+$('#pBill').innerHTML=`<div class="r"><span>Bill amount</span><b>${money(pi.bill)}</b></div><div class="r"><span>Payment now</span><b>${STATUS_LABEL[pi.status]}</b></div>`+
+`<div class="r tot"><span>Amount to collect</span><b>${money(after)}</b></div>`;
+}
+return {d,adj,total,bill,already};
 };
 calc();
 const body=$('#dlgBody');
 body.oninput=calc;
 body.onclick=e=>{
 const pd=e.target.closest('[data-pd]');if(pd){P.disc=pd.dataset.pd;calc();return}
-const f=e.target.closest('[data-fill]');
-if(f){const r=calc(),bal=Math.max(0,r.due-r.paid);const el={cash:'#pCash',upi:'#pUpi',card:'#pCard'}[f.dataset.fill];$(el).value=num($(el).value)+bal;calc()}
+const pp=e.target.closest('[data-pp]');if(pp){P.pay=pp.dataset.pp;P.touched=true;calc()}
 };
 $('#pNo').onclick=closeDlg;
 $('#pOk').onclick=()=>{
-const r=calc(),d=dcn();
-B.setBilling(id,{startAt:s.startAt,discType:d.t,discVal:d.v,discount:r.d,total:r.total,adjust:r.adj,cash:num($('#pCash').value),upi:num($('#pUpi').value),cardAmt:num($('#pCard').value),paidAt:Date.now()}).catch(writeErr);
-closeDlg();toast('Payment saved.');
+const r=calc();
+if(adm){
+const d=dcn(),paidAmt=!P.touched?r.already:(P.pay==='paid'?r.bill:0);
+B.setBilling(id,{startAt:s.startAt,discType:d.t,discVal:d.v,discount:r.d,total:r.total,adjust:r.adj,paidAmount:paidAmt,paidAt:Date.now(),paidBy:me.name}).catch(writeErr);
+}else if(P.touched){
+B.setPaid(id,P.pay==='paid',me.name).catch(writeErr);
+}
+closeDlg();toast(P.touched||adm?'Payment saved.':'No change.');
 };
 }
 function nextTicket(offset){
@@ -745,14 +766,14 @@ socks:g.socks,remark:g.remark,baseMin:g.min,durationMin:g.min,startAt:now,extens
 B.createGuest(guest).then(()=>{
 if(g.phone)B.saveContact(id,{phone:g.phone,startAt:now}).catch(()=>{});
 B.createBilling(id,{startAt:now,play:b.play,socks:b.sock,card:b.card,discount:b.discount,discType:dc.t,discVal:dc.v,total:b.total,
-cash:adm?num(g.cash):0,upi:adm?num(g.upi):0,cardAmt:adm?num(g.cardAmt):0}).catch(writeErr);
+paid:!!g.paid,paidBy:me.name}).catch(writeErr);
 }).catch(writeErr);
 return guest;
 }
 const chipRow=(key,items,fmt)=>`<div class="chips">${items.map(v=>`<button type="button" class="chip" data-k="${key}" data-v="${esc(v)}">${esc(fmt?fmt(v):v)}</button>`).join('')}</div>`;
 function openEntry(){
 if(!canWrite())return;
-entry={area:lastArea,ctype:'new',min:60,card:'Basic',bday:false,socks:'No socks',disc:'none',players:1};
+entry={area:lastArea,ctype:'new',min:60,card:'Basic',bday:false,socks:'No socks',disc:'none',pay:'pending',players:1};
 $('#entryBody').innerHTML=`
 <div class="dlg-head"><h2>New check-in</h2><button class="xbtn" data-close aria-label="Close">\u2715</button></div>
 <div class="lbl">Play area</div><div class="atiles">
@@ -772,16 +793,8 @@ $('#entryBody').innerHTML=`
 <div class="two" id="dcWrap" hidden><label class="field"><span>Custom discount</span><input id="dcVal" type="number" min="0" step="1" value="0" inputmode="decimal"></label>
 <label class="field"><span>Type</span><select id="dcType"><option value="pct">Percent (%)</option><option value="amt">Amount (${esc(settings.currency)})</option></select></label></div></div>
 <label class="field"><span>Remark (optional)</span><textarea id="eRem" maxlength="160" placeholder="Wristband number, party, allergies..."></textarea></label>
-<div class="adm">
 <div class="bill" id="eBill"></div>
-<div class="lbl" style="color:var(--yellow)">Money received (optional)</div>
-<div class="paygrid"><label class="field"><span>Cash</span><input id="pCash" type="number" min="0" step="1" value="0"></label>
-<label class="field"><span>UPI</span><input id="pUpi" type="number" min="0" step="1" value="0"></label>
-<label class="field"><span>Card</span><input id="pCard" type="number" min="0" step="1" value="0"></label></div>
-<div class="acts" style="margin-bottom:10px"><button type="button" class="mini" data-efill="cash">Cash = due</button><button type="button" class="mini" data-efill="upi">UPI = due</button><button type="button" class="mini" data-efill="card">Card = due</button></div>
-<div class="bill" id="eTot"></div>
-</div>
-<p class="hint stf" style="margin:0 0 10px">${isAdmin()?'':'Payment is recorded by the admin after check-in.'}</p>
+<div class="lbl" style="color:var(--yellow-ink)">Payment received</div>${chipRow('pay',['pending','paid'],v=>v==='paid'?'Paid':'Pending')}
 <div class="dlg-actions"><button class="btn ghost" data-close>Cancel</button><button class="btn primary big" id="eGo">Start timer</button></div>`;
 const nm=customers();
 $('#nameList').innerHTML=Object.keys(nm).slice(0,400).map(k=>`<option value="${esc(nm[k].name)}"></option>`).join('');
@@ -804,25 +817,19 @@ $('#eCustomWrap').hidden=entry.min!=='custom';
 $('#bdayWrap').hidden=entry.card!=='Premium';
 $('#dcWrap').hidden=entry.disc!=='custom';
 $('#cardLbl').textContent=entry.ctype==='new'?'Card type (new card)':'Card type (their existing card)';
-if(!isAdmin())return;
 const min=entryMin(),b=calcBill(entry,min,entryDisc()),m=money;
 const rows=[`<div class="r"><span>${esc(AREAS[entry.area].label)} \u00B7 ${esc(min?fmtMin(min):'-')}</span><b>${m(b.fee)} \u00D7 ${b.n-b.freeN}${b.freeN?' (1 free)':''}</b></div>`];
 if(b.sock)rows.push(`<div class="r"><span>Socks (${esc(entry.socks)})</span><b>${m(b.sockUnit)} \u00D7 ${b.n}</b></div>`);
-if(b.discount)rows.push(`<div class="r"><span>Discount</span><b>\u2212${m(b.discount)}</b></div>`);
+if(b.discount)rows.push(`<div class="r"><span>Discount on play time</span><b>\u2212${m(b.discount)}</b></div>`);
 if(b.card)rows.push(`<div class="r"><span>${esc(entry.card)} card (new customer)</span><b>${m(b.card)}</b></div>`);
-rows.push(`<div class="r tot"><span>Amount due</span><b>${m(b.total)}</b></div>`);
+rows.push(`<div class="r tot"><span>Bill amount</span><b>${m(b.total)}</b></div>`);
+rows.push(`<div class="r"><span>Amount due after payment</span><b>${entry.pay==='paid'?m(0):m(b.total)}</b></div>`);
 $('#eBill').innerHTML=rows.join('');
-const cash=num($('#pCash').value),upi=num($('#pUpi').value),card=num($('#pCard').value),paid=cash+upi+card;
-$('#eTot').innerHTML=`<div class="r"><span>Cash</span><b>${m(cash)}</b></div><div class="r"><span>UPI</span><b>${m(upi)}</b></div><div class="r"><span>Card</span><b>${m(card)}</b></div>`+
-`<div class="r tot"><span>Total received (combined)</span><b>${m(paid)}</b></div><div class="r"><span>Balance</span><b>${m(b.total-paid)}</b></div>`;
 }
 edlg.addEventListener('click',e=>{
 if(e.target.closest('[data-close]')){edlg.close();return}
 const st=e.target.closest('[data-step]');
 if(st){const p=$('#ePlayers');p.value=Math.min(30,Math.max(1,(parseInt(p.value,10)||1)+Number(st.dataset.step)));entry.players=Number(p.value);syncEntry();return}
-const f=e.target.closest('[data-efill]');
-if(f&&isAdmin()){const due=calcBill(entry,entryMin(),entryDisc()).total,paid=num($('#pCash').value)+num($('#pUpi').value)+num($('#pCard').value);
-const el={cash:'#pCash',upi:'#pUpi',card:'#pCard'}[f.dataset.efill];$(el).value=num($(el).value)+Math.max(0,due-paid);syncEntry();return}
 const k=e.target.closest('[data-k]');
 if(k){const key=k.dataset.k,v=k.dataset.v;
 if(key==='min')entry.min=v==='custom'?'custom':Number(v);
@@ -861,19 +868,20 @@ if(!min||min<5){toast('Enter at least 5 minutes.',true);return}
 const dc=entryDisc(),adm=isAdmin();
 const g=commitGuest({area:entry.area,name,phone:$('#ePhone').value.trim(),players:entry.players,ctype:entry.ctype,card:entry.card,bday:entry.bday,
 socks:entry.socks,remark:$('#eRem').value.trim(),min,discType:dc.t,discVal:dc.v,
-cash:adm?$('#pCash').value:0,upi:adm?$('#pUpi').value:0,cardAmt:adm?$('#pCard').value:0},nextTicket(0),Date.now());
+paid:entry.pay==='paid'},nextTicket(0),Date.now());
 edlg.close();
 toast(`${name} checked in: ${AREAS[g.area].label}, ${fmtMin(min)}.`);
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
 }
 $('#newBtn').addEventListener('click',openEntry);
 const newRow=prev=>({name:'',phone:'',players:1,area:prev?prev.area:lastArea,min:prev?prev.min:'60',custom:prev?prev.custom:45,ctype:prev?prev.ctype:'new',card:prev?prev.card:'Basic',
-bday:'no',socks:prev?prev.socks:'No socks',remark:'',disc:'none',dcVal:0,dcType:'pct',cash:'',upi:'',cardAmt:''});
+bday:'no',socks:prev?prev.socks:'No socks',remark:'',disc:'none',dcVal:0,dcType:'pct'});
+let bulkPay='pending';
 function rowCalc(r){
 const min=r.min==='custom'?(parseInt(r.custom,10)||0):Number(r.min);
 const dc=!isAdmin()||r.disc==='none'?{t:'none',v:0}:r.disc==='custom'?{t:r.dcType==='amt'?'amt':'pct',v:num(r.dcVal)}:{t:'pct',v:Number(r.disc)};
 const b=calcBill({area:r.area,card:r.card,ctype:r.ctype,socks:r.socks,bday:r.card==='Premium'&&r.bday==='yes',players:Math.max(1,parseInt(r.players,10)||1)},min,dc);
-return {min,dc,b,paid:num(r.cash)+num(r.upi)+num(r.cardAmt)};
+return {min,dc,b};
 }
 function rowHTML(r,i){
 const sel=(f,list,fmt)=>`<select data-f="${f}">${list.map(v=>`<option value="${esc(v)}"${String(r[f])===String(v)?' selected':''}>${esc(fmt?fmt(v):v)}</option>`).join('')}</select>`;
@@ -892,18 +900,11 @@ return `<div class="brow" data-i="${i}">
 <label class="field"><span>Socks</span>${sel('socks',SOCKS)}</label>
 <label class="field" style="grid-column:1/-1"><span>Remark</span><input data-f="remark" maxlength="160" value="${esc(r.remark)}"></label>
 </div>
-<div class="adm bpay">
-<div class="bgrid">
-<label class="field"><span>Discount</span>${sel('disc',['none','5','10','15','20','custom'],v=>v==='none'?'None':v==='custom'?'Custom':v+'%')}</label>
-<div class="field" data-dw${r.disc==='custom'?'':' hidden'}><span>Custom discount</span><div class="two" style="gap:6px"><input data-f="dcVal" type="number" min="0" step="1" value="${esc(r.dcVal)}">${sel('dcType',['pct','amt'],v=>v==='pct'?'%':'\u20B9')}</div></div>
-<div class="field"><span>Amount due</span><div class="bval" data-due>-</div></div>
-<label class="field"><span>Cash</span><input data-f="cash" type="number" min="0" step="1" value="${esc(r.cash)}"></label>
-<label class="field"><span>UPI</span><input data-f="upi" type="number" min="0" step="1" value="${esc(r.upi)}"></label>
-<label class="field"><span>Card</span><input data-f="cardAmt" type="number" min="0" step="1" value="${esc(r.cardAmt)}"></label>
-<div class="field"><span>Total received</span><div class="bval" data-paid>-</div></div>
-</div>
-<div class="acts"><button class="mini" data-bfill="cash" data-i="${i}">Cash = due</button><button class="mini" data-bfill="upi" data-i="${i}">UPI = due</button><button class="mini" data-bfill="card" data-i="${i}">Card = due</button></div>
-</div></div>`;
+<div class="bpay"><div class="bgrid">
+<label class="field adm"><span>Discount (play time only)</span>${sel('disc',['none','5','10','15','20','custom'],v=>v==='none'?'None':v==='custom'?'Custom':v+'%')}</label>
+<div class="field adm" data-dw${r.disc==='custom'?'':' hidden'}><span>Custom discount</span><div class="two" style="gap:6px"><input data-f="dcVal" type="number" min="0" step="1" value="${esc(r.dcVal)}">${sel('dcType',['pct','amt'],v=>v==='pct'?'%':'\u20B9')}</div></div>
+<div class="field"><span>Bill amount</span><div class="bval" data-due>-</div></div>
+</div></div></div>`;
 }
 function renderBulk(){
 $('#bulkRows').innerHTML=bulk.map(rowHTML).join('');
@@ -915,23 +916,25 @@ const c=rowCalc(r);
 $('[data-cw]',el).hidden=r.min!=='custom';$('[data-bw]',el).hidden=r.card!=='Premium';
 const dw=$('[data-dw]',el);if(dw)dw.hidden=r.disc!=='custom';
 const due=$('[data-due]',el);if(due)due.textContent=money(c.b.total);
-const pd=$('[data-paid]',el);if(pd)pd.textContent=money(c.paid)+(c.paid-c.b.total?'  (balance '+money(c.b.total-c.paid)+')':'');
 }
+function syncBulkPay(){$$('#bulkBody [data-bpay]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.bpay===bulkPay)))}
 function updateBulkTotals(){
-const rows=bulk.filter(r=>r.name.trim()),cs=rows.map(rowCalc);
-const due=sum(cs,c=>c.b.total),cash=sum(rows,r=>num(r.cash)),upi=sum(rows,r=>num(r.upi)),card=sum(rows,r=>num(r.cardAmt)),paid=cash+upi+card;
+const rows=bulk.filter(r=>r.name.trim()),cs=rows.map(rowCalc),total=sum(cs,c=>c.b.total);
 const players=sum(rows,r=>Math.max(1,parseInt(r.players,10)||1));
+syncBulkPay();
 $('#bulkTot').innerHTML=`<div class="r"><span>Participants</span><b>${rows.length} (${players} player${players===1?'':'s'})</b></div>`+
-(isAdmin()?`<div class="r"><span>Total amount due</span><b>${money(due)}</b></div><div class="r"><span>Cash</span><b>${money(cash)}</b></div><div class="r"><span>UPI</span><b>${money(upi)}</b></div><div class="r"><span>Card</span><b>${money(card)}</b></div>`+
-`<div class="r tot"><span>Total received (cash + UPI + card)</span><b>${money(paid)}</b></div><div class="r"><span>Balance</span><b>${money(due-paid)}</b></div>`:'');
+`<div class="r"><span>Total bill amount</span><b>${money(total)}</b></div>`+
+`<div class="r tot"><span>Amount due after payment</span><b>${bulkPay==='paid'?money(0):money(total)}</b></div>`;
 }
 function openBulk(){
 if(!canWrite())return;
-bulk=[newRow(),newRow(),newRow()];
+bulk=[newRow(),newRow(),newRow()];bulkPay='pending';
 $('#bulkBody').innerHTML=`<div class="dlg-head"><h2>Bulk entry</h2><button class="xbtn" data-bclose aria-label="Close">\u2715</button></div>
 <p class="sub-line">Add every participant with their own details. All timers start when you press the button. Rows with no name are skipped.</p>
 <div id="bulkRows"></div>
-<div class="acts" style="margin:6px 0 12px"><button class="btn ghost" data-badd="1">+ Add row</button><button class="btn ghost" data-badd="5">+ Add 5 rows</button><button class="btn ghost" data-bcopy="1">Copy last row</button></div>
+<div class="acts" style="margin:6px 0 14px"><button class="btn ghost" data-badd="1">+ Add row</button><button class="btn ghost" data-badd="5">+ Add 5 rows</button><button class="btn ghost" data-bcopy="1">Copy last row</button></div>
+<div class="lbl" style="color:var(--yellow-ink)">Payment received for the whole group (one choice for everyone)</div>
+<div class="chips"><button type="button" class="chip" data-bpay="pending">Pending</button><button type="button" class="chip" data-bpay="paid">Paid</button></div>
 <div class="bill" id="bulkTot"></div>
 <div class="dlg-actions"><button class="btn ghost" data-bclose>Cancel</button><button class="btn primary big" id="bulkGo">Start all timers</button></div>`;
 bdlg.showModal();renderBulk();
@@ -942,10 +945,9 @@ const del=e.target.closest('[data-bdel]');
 if(del){bulk.splice(Number(del.dataset.bdel),1);if(!bulk.length)bulk.push(newRow());renderBulk();return}
 const add=e.target.closest('[data-badd]');
 if(add){for(let k=0;k<Number(add.dataset.badd);k++)bulk.push(newRow(bulk[bulk.length-1]));renderBulk();return}
-if(e.target.closest('[data-bcopy]')){const l=bulk[bulk.length-1];bulk.push(Object.assign({},l,{name:'',phone:'',cash:'',upi:'',cardAmt:'',remark:''}));renderBulk();return}
-const f=e.target.closest('[data-bfill]');
-if(f&&isAdmin()){const i=Number(f.dataset.i),r=bulk[i],c=rowCalc(r),bal=Math.max(0,c.b.total-c.paid),k={cash:'cash',upi:'upi',card:'cardAmt'}[f.dataset.bfill];
-r[k]=num(r[k])+bal;renderBulk();return}
+if(e.target.closest('[data-bcopy]')){const l=bulk[bulk.length-1];bulk.push(Object.assign({},l,{name:'',phone:'',remark:''}));renderBulk();return}
+const bp=e.target.closest('[data-bpay]');
+if(bp){bulkPay=bp.dataset.bpay;updateBulkTotals();return}
 if(e.target.id==='bulkGo')submitBulk();
 });
 bdlg.addEventListener('input',e=>{
@@ -957,11 +959,11 @@ function submitBulk(){
 const rows=bulk.map((r,i)=>({r,i})).filter(x=>x.r.name.trim());
 if(!rows.length){toast('Enter at least one participant name.',true);return}
 for(const x of rows){const c=rowCalc(x.r);if(!c.min||c.min<5){toast('Participant '+(x.i+1)+': enter at least 5 minutes.',true);return}}
-const now=Date.now(),t0=nextTicket(0),adm=isAdmin();
+const now=Date.now(),t0=nextTicket(0);
 rows.forEach((x,n)=>{
 const c=rowCalc(x.r),r=x.r;
 commitGuest({area:r.area,name:r.name.trim(),phone:r.phone.trim(),players:Math.max(1,parseInt(r.players,10)||1),ctype:r.ctype,card:r.card,bday:r.bday==='yes',
-socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,cash:adm?r.cash:0,upi:adm?r.upi:0,cardAmt:adm?r.cardAmt:0},t0+n,now);
+socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,paid:bulkPay==='paid'},t0+n,now);
 });
 bdlg.close();toast(rows.length+' participant'+(rows.length>1?'s':'')+' checked in.');
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
@@ -976,7 +978,7 @@ return match(s,st,{skipStatus:!!need});
 }
 function renderRecords(){
 $('#recTitle').textContent=TITLES[tab]||'Customers';
-const rows=records(),now=Date.now(),adm=isAdmin(),cols=adm?19:14;
+const rows=records(),now=Date.now(),adm=isAdmin(),cols=adm?16:me?14:12;
 $('#rBody').innerHTML=rows.length?rows.map(s=>{
 const extra=sum(s.extensions,x=>x.min);let tag,out;
 if(s.status==='active'){const o=endOf(s)<=now;tag=`<span class="tag ${o?'up':'play'}">${o?'Time\u2019s up':'Playing'}</span>`;out='Playing'}
@@ -984,10 +986,10 @@ else if(s.status==='completed'){tag='<span class="tag done">Completed</span>';ou
 else{tag='<span class="tag cancel">Cancelled</span>';out=clockStr(s.cancelledAt||s.startAt)}
 const i=esc(s.id),canc=s.status==='cancelled';
 const acts=s.status==='active'?
-`<button class="mini go" data-r="out" data-id="${i}" data-write>Mark out</button><button class="mini" data-r="more" data-id="${i}" data-write>Add time</button><button class="mini" data-r="edit" data-id="${i}" data-write>Edit</button><button class="mini adm" data-r="pay" data-id="${i}" data-write>Payment</button><button class="mini bad" data-r="cancel" data-id="${i}" data-write>Cancel</button>`:
-`<button class="mini" data-r="edit" data-id="${i}" data-write>Edit</button>${canc?'':`<button class="mini adm" data-r="pay" data-id="${i}" data-write>Payment</button>`}<button class="mini bad adm" data-r="del" data-id="${i}" data-write>Delete</button>`;
+`<button class="mini go" data-r="out" data-id="${i}" data-write>Mark out</button><button class="mini" data-r="more" data-id="${i}" data-write>Add time</button><button class="mini" data-r="edit" data-id="${i}" data-write>Edit</button><button class="mini" data-r="pay" data-id="${i}" data-write>Payment</button><button class="mini bad" data-r="cancel" data-id="${i}" data-write>Cancel</button>`:
+`<button class="mini" data-r="edit" data-id="${i}" data-write>Edit</button>${canc?'':`<button class="mini" data-r="pay" data-id="${i}" data-write>Payment</button>`}<button class="mini bad adm" data-r="del" data-id="${i}" data-write>Delete</button>`;
 const sub=[];if(phoneOf(s))sub.push(esc(phoneOf(s)));if(s.remark)sub.push('\u201C'+esc(s.remark)+'\u201D');if(s.cancelReason)sub.push('Reason: '+esc(s.cancelReason));
-const cls=canc?'strike':'',due=dueOf(s),paid=paidOf(s);
+const cls=canc?'strike':'',pi=payInfo(s);
 return `<tr><td>${esc(ticketStr(s.ticket))}<span class="sub">${esc(dateStr(s.startAt))}</span></td>
 <td class="name"><b>${esc(s.name)}</b>${sub.map(x=>`<span class="sub">${x}</span>`).join('')}</td>
 <td><span class="dot${s.area==='softplay'?' soft':''}"></span>${esc(AREAS[s.area].label)}</td>
@@ -996,19 +998,17 @@ return `<tr><td>${esc(ticketStr(s.ticket))}<span class="sub">${esc(dateStr(s.sta
 <td>${esc(s.card)}</td><td>${esc(s.socks)}</td><td>${s.bday?'<span class="tag bd">Free play</span>':'No'}</td>
 <td class="num">${esc(fmtMin(s.durationMin))}${extra?`<span class="sub">incl. +${esc(fmtMin(extra))}</span>`:''}${s.editedBy?`<span class="sub">edited</span>`:''}</td>
 <td>${esc(clockStr(s.startAt))} \u2192 ${esc(out)}</td>
-<td class="num adm"><span class="${cls}">${esc(money(due))}</span>${discOf(s)?`<span class="sub">\u2212${esc(money(discOf(s)))} off</span>`:''}</td>
-<td class="num adm"><span class="${cls}">${esc(money(cashOf(s)))}</span></td>
-<td class="num adm"><span class="${cls}">${esc(money(upiOf(s)))}</span></td>
-<td class="num adm"><span class="${cls}">${esc(money(cardOf(s)))}</span></td>
-<td class="num adm"><span class="${cls}"><b>${esc(money(paid))}</b></span>${!canc&&due-paid>0?`<span class="sub" style="color:var(--yellow)">balance ${esc(money(due-paid))}</span>`:''}</td>
+<td class="num adm"><span class="${cls}">${esc(money(dueOf(s)))}</span>${discOf(s)?`<span class="sub">\u2212${esc(money(discOf(s)))} off</span>`:''}</td>
+<td class="num stf">${pi&&!canc?esc(money(pi.due)):'-'}</td>
+<td class="stf">${pi&&!canc?`<span class="tag pay-${pi.status}">${STATUS_LABEL[pi.status]}</span>`:'-'}</td>
 <td>${tag}</td>
 <td class="adm">${esc(s.by||'-')}${s.outBy?`<span class="sub">out: ${esc(s.outBy)}</span>`:''}</td>
 <td><div class="acts">${acts}</div></td></tr>`;
 }).join(''):`<tr><td colspan="${cols}" style="text-align:center;color:var(--muted);padding:30px">${loaded?'No customers found for these filters.':'Loading...'}</td></tr>`;
 const live=rows.filter(s=>s.status!=='cancelled');
 let line=rows.length+(rows.length===1?' customer':' customers')+' \u00B7 '+sum(rows,s=>s.players)+' players';
-if(adm){const cash=sum(live,cashOf),upi=sum(live,upiOf),card=sum(live,cardOf),paid=cash+upi+card,due=sum(live,dueOf);
-line+=` \u00B7 Cash ${money(cash)} \u00B7 UPI ${money(upi)} \u00B7 Card ${money(card)} \u00B7 Total received ${money(paid)} \u00B7 Due ${money(due)} (cancelled entries not counted)`}
+if(adm){line+=` \u00B7 Bill total ${money(sum(live,dueOf))} \u00B7 Received ${money(sum(live,paidOf))} \u00B7 Amount due ${money(sum(live,owedOf))} (cancelled entries not counted)`}
+else if(me){line+=` \u00B7 Amount still to collect ${money(sum(live,s=>{const p=payInfo(s);return p?p.due:0}))}`}
 $('#rCount').textContent=line;
 }
 $('#rBody').addEventListener('click',e=>{
@@ -1025,11 +1025,13 @@ setTimeout(()=>URL.revokeObjectURL(url),2000);toast('CSV downloaded.');
 $('#csvBtn').addEventListener('click',()=>{
 const rows=records();if(!rows.length){toast('Nothing to export for these filters.',true);return}
 const head=['Ticket','Date','Customer'].concat(me?['Phone']:[],['Area','Players','Customer type','Card','Socks','Birthday free play','Booked (min)','Extra (min)','Status','In','Out','Cancel reason','Remark']);
-if(isAdmin())head.push('Amount due','Discount','Cash','UPI','Card','Total received','Entered by');
+if(isAdmin())head.push('Bill amount','Discount','Amount due','Payment','Entered by');else if(me)head.push('Amount due','Payment');
 exportCsv('ufh-'+tab+'-'+new Date().toISOString().slice(0,10)+'.csv',head,rows.map(s=>{
 const extra=sum(s.extensions,x=>x.min),out=s.endedAt||s.cancelledAt;
 const r=[ticketStr(s.ticket),new Date(s.startAt).toLocaleDateString(),s.name].concat(me?[phoneOf(s)]:[],[AREAS[s.area].label,s.players,s.ctype,s.card,s.socks,s.bday?'Yes':'No',s.durationMin-extra,extra,s.status,clockStr(s.startAt),out?clockStr(out):'',s.cancelReason,s.remark]);
-if(isAdmin()){const c=s.status==='cancelled';r.push(c?0:dueOf(s),discOf(s),c?0:cashOf(s),c?0:upiOf(s),c?0:cardOf(s),c?0:paidOf(s),s.by||'')}
+const c=s.status==='cancelled',pi=payInfo(s);
+if(isAdmin())r.push(c?0:dueOf(s),discOf(s),c?0:owedOf(s),c||!pi?'':STATUS_LABEL[pi.status],s.by||'');
+else if(me)r.push(c||!pi?'':pi.due,c||!pi?'':STATUS_LABEL[pi.status]);
 return r;
 }));
 });
@@ -1071,12 +1073,11 @@ function renderStats(){
 if(!isAdmin())return;
 const st=FS.stats,all=sessions.filter(s=>match(s,st,{skipStatus:true}));
 const rows=all.filter(s=>s.status!=='cancelled'),canc=all.filter(s=>s.status==='cancelled');
-const cash=sum(rows,cashOf),upi=sum(rows,upiOf),card=sum(rows,cardOf),paid=cash+upi+card,due=sum(rows,dueOf),disc=sum(rows,discOf);
+const paid=sum(rows,paidOf),due=sum(rows,dueOf),owed=sum(rows,owedOf),disc=sum(rows,discOf);
 const done=rows.filter(s=>s.status==='completed'&&s.endedAt);
 const avg=done.length?sum(done,s=>(s.endedAt-s.startAt)/60000)/done.length:0;
 const extRev=sum(rows,s=>bl(s).extTotal||0);
-$('#statCards').innerHTML=[[money(paid),'total received (combined)'],[money(cash),'cash received'],[money(upi),'UPI received'],[money(card),'card received'],
-[money(due),'amount due'],[money(due-paid),'not collected yet'],[money(disc),'discounts given'],[rows.length,'check-ins'],[sum(rows,s=>s.players),'players'],
+$('#statCards').innerHTML=[[money(paid),'total received (paid)'],[money(due),'total bill amount'],[money(owed),'amount due (pending)'],[money(disc),'discounts given'],[rows.length,'check-ins'],[sum(rows,s=>s.players),'players'],
 [money(rows.length?paid/rows.length:0),'average received per check-in'],[avg?fmtMin(avg):'-','average time played'],[rows.filter(s=>s.bday).length,'birthday free plays'],[canc.length,'cancelled (not counted)']]
 .map(c=>`<div class="stat"><b>${esc(c[0])}</b><span>${esc(c[1])}</span></div>`).join('');
 $('#areaPanels').innerHTML=AREA_KEYS.map(a=>{
@@ -1099,7 +1100,7 @@ bars($('#hourChart'),it);
 const playRev=sum(rows,s=>bl(s).play||0),sockRev=sum(rows,s=>bl(s).socks||0),cardRev=sum(rows,s=>bl(s).card||0);
 const adj=sum(rows,s=>bl(s).adjust||0);
 lines($('#revLines'),[['Play fees',playRev],['Socks',sockRev],['Card sales',cardRev],['Extra time',extRev],['Discounts',-disc],['Adjustments',adj]].filter(e=>e[1]!==0),v=>money(v));
-lines($('#payLines'),[['Cash',cash],['UPI',upi],['Card',card]].filter(e=>e[1]>0),v=>money(v));
+lines($('#payLines'),[['Paid',rows.filter(s=>owedOf(s)<=0).length],['Pending',rows.filter(s=>owedOf(s)>0).length]].filter(e=>e[1]>0));
 lines($('#cardLines'),CARDS.map(c=>[c,rows.filter(s=>s.card===c).length]).filter(e=>e[1]>0));
 lines($('#sockLines'),SOCKS.map(k=>[k,sum(rows.filter(s=>s.socks===k),s=>s.players)]).filter(e=>e[1]>0));
 const dl=s=>{const b=bl(s);return b.discType==='amt'?'Custom '+money(b.discVal):b.discType==='pct'?b.discVal+'% off':'No discount'};
