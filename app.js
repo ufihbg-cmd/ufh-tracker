@@ -78,7 +78,10 @@ const isOver=(s,now)=>s.status==='active'&&endOf(s)<=(now||Date.now());
 const bl=s=>billing[s.id]||{};
 const dueOf=s=>{const b=bl(s);return (b.total||0)+(b.extTotal||0)+(b.adjust||0)};
 const paidOf=s=>Math.min(dueOf(s),bl(s).paidAmount||0);          // amount received so far
-const owedOf=s=>Math.max(0,dueOf(s)-paidOf(s));                  // amount still due
+const owedOf=s=>Math.max(0,dueOf(s)-paidOf(s));
+const cashOf=s=>bl(s).cash||0, upiOf=s=>bl(s).upi||0, cardOf=s=>bl(s).cardAmt||0;
+const methodOf=s=>{const p=[];if(cashOf(s)>0)p.push('Cash');if(upiOf(s)>0)p.push('UPI');if(cardOf(s)>0)p.push('Card');if(!p.length&&paidOf(s)>0)p.push('Not recorded');return p.join(' + ')};
+const PAYCHIP={pending:'Pending',cash:'Paid by Cash',upi:'Paid by UPI'};                  // amount still due
 const discOf=s=>bl(s).discount||0;
 const statusOf=(bill,rec)=>bill<=0?'paid':rec>=bill?'paid':rec<=0?'pending':'partial';
 const STATUS_LABEL={pending:'Pending',partial:'Pending',paid:'Paid'};
@@ -136,10 +139,10 @@ const o={};Object.keys(r).forEach(k=>{o[GREV[k]||k]=r[k]});
 ['ticket','players','baseMin','durationMin','startAt','endedAt','cancelledAt','editedAt'].forEach(k=>{if(o[k]!=null)o[k]=Number(o[k])});
 return o;
 };
-const BMAP={startAt:'start_at',discType:'disc_type',discVal:'disc_val',paidAmount:'paid_amount',paidAt:'paid_at',paidBy:'paid_by',extTotal:'ext_total',extList:'ext_list'};
+const BMAP={startAt:'start_at',discType:'disc_type',discVal:'disc_val',paidAmount:'paid_amount',cardAmt:'card_amt',paidAt:'paid_at',paidBy:'paid_by',extTotal:'ext_total',extList:'ext_list'};
 const toBill=o=>{const r={};Object.keys(o).forEach(k=>{if(o[k]!==undefined)r[BMAP[k]||k]=o[k]});return r};
 const fromBill=r=>({startAt:Number(r.start_at),play:Number(r.play),socks:Number(r.socks),card:Number(r.card),discount:Number(r.discount),discType:r.disc_type,discVal:Number(r.disc_val),
-total:Number(r.total),extTotal:Number(r.ext_total),adjust:Number(r.adjust),paidAmount:Number(r.paid_amount),paidAt:r.paid_at,paidBy:r.paid_by,extList:r.ext_list||[]});
+total:Number(r.total),extTotal:Number(r.ext_total),adjust:Number(r.adjust),paidAmount:Number(r.paid_amount),cash:Number(r.cash),upi:Number(r.upi),cardAmt:Number(r.card_amt),paidAt:r.paid_at,paidBy:r.paid_by,extList:r.ext_list||[]});
 const fromStaff=r=>({name:r.name,email:r.email,role:r.role,active:r.active,createdAt:Number(r.created_at)});
 function live(table,pk,loadRows,toKV,emit,err){
 const store=new Map();let alive=true,pend=null,first=true,hiddenAt=0;
@@ -228,7 +231,7 @@ subContacts:(since,cb,err)=>live('contacts','id',()=>fetchAll(()=>client.from('c
 r=>[r.id,r.phone||''],st=>cb(Object.fromEntries(st)),err),
 subPayStatus:(since,cb,err)=>live('payment_status','id',()=>fetchAll(()=>client.from('payment_status').select('*').gte('start_at',since||0).order('id')),
 r=>[r.id,{due:Number(r.due),balance:Number(r.balance),status:r.status}],st=>cb(Object.fromEntries(st)),err),
-setPaid:async(id,paid,by)=>{await ok(client.rpc('billing_set_paid',{p_id:id,p_paid:!!paid,p_by:by||''}))},
+setPaid:async(id,paid,by,method)=>{await ok(client.rpc('billing_set_paid',{p_id:id,p_paid:!!paid,p_by:by||'',p_method:method||'cash'}))},
 subBilling:(since,cb,err)=>live('billing','id',()=>fetchAll(()=>client.from('billing').select('*').gte('start_at',since||0).order('id')),
 r=>[r.id,fromBill(r)],st=>cb(Object.fromEntries(st)),err),
 createGuest:async s=>{await ok(client.from('guests').insert(toRowG(s)))},
@@ -251,7 +254,7 @@ if(o.startAt!==undefined)row.start_at=o.startAt;
 await ok(client.from('contacts').upsert(row,{onConflict:'id'}));
 },
 createBilling:async(id,o)=>{
-await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,paid:!!o.paid,paid_by:o.paidBy}}));
+await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,paid:!!o.paid,pay_method:o.payMethod||'cash',paid_by:o.paidBy}}));
 },
 setBilling:async(id,o)=>{await ok(client.from('billing').upsert(Object.assign({id},toBill(o)),{onConflict:'id'}))},
 addExtBilling:async(id,price,min)=>{await ok(client.rpc('billing_add_ext',{p_id:id,p_price:price,p_min:min}))},
@@ -532,7 +535,7 @@ const facts=[`<span class="fact">${esc(ticketStr(s.ticket))}</span>`,`<span clas
 `<span class="fact">Socks: ${esc(s.socks)}</span>`];
 if(s.bday)facts.push('<span class="fact hl">Birthday free play</span>');
 const pi=payInfo(s);
-if(pi)facts.push(`<span class="fact pay-${pi.status}">${STATUS_LABEL[pi.status]}${pi.status!=='paid'?' \u00B7 Due '+esc(money(pi.due)):''}</span>`);
+if(pi)facts.push(`<span class="fact pay-${pi.status}">${STATUS_LABEL[pi.status]}${pi.status!=='paid'?' \u00B7 Due '+esc(money(pi.due)):(isAdmin()&&methodOf(s)?' \u00B7 '+esc(methodOf(s)):'')}</span>`);
 const ph=phoneOf(s);
 return `<article class="guest" data-id="${esc(s.id)}" data-area="${esc(s.area)}" data-start="${s.startAt}" data-end="${endOf(s)}" data-state="ok">
 <div class="g-top"><div><span class="areatag">${esc(AREAS[s.area].label)}</span><h3>${esc(s.name)}</h3>
@@ -701,7 +704,7 @@ if(!pi){toast('Payment details are still loading. Try again in a moment.',true);
 const adm=isAdmin(),b=adm?bl(s):{};
 const base=b.play||0,other=(b.socks||0)+(b.card||0),ext=b.extTotal||0;
 const P={disc:b.discType==='amt'?'custom':b.discType==='pct'?([5,10,15,20].indexOf(Number(b.discVal))>=0?String(Number(b.discVal)):'custom'):'none',
-dcType:b.discType==='amt'?'amt':'pct',dcVal:b.discVal||0,pay:pi.status==='paid'?'paid':'pending',touched:false};
+dcType:b.discType==='amt'?'amt':'pct',dcVal:b.discVal||0,pay:pi.status!=='paid'?'pending':((b.upi||0)>(b.cash||0)?'upi':'cash'),touched:false};
 openDlg(`<h2>Payment: ${esc(s.name)}</h2><p class="sub-line">${esc(ticketStr(s.ticket))} \u00B7 ${s.players} player${s.players>1?'s':''} \u00B7 ${esc(AREAS[s.area].label)}</p>
 <div class="bill" id="pBill"></div>
 ${adm?`<div class="lbl">Discount (play time only)</div>
@@ -710,8 +713,8 @@ ${adm?`<div class="lbl">Discount (play time only)</div>
 <label class="field"><span>Type</span><select id="pDcType"><option value="pct"${P.dcType==='pct'?' selected':''}>Percent (%)</option><option value="amt"${P.dcType==='amt'?' selected':''}>Amount (${esc(settings.currency)})</option></select></label></div>
 <label class="field"><span>Adjustment (${esc(settings.currency)}, can be negative)</span><input id="pAdj" type="number" step="1" value="${b.adjust||0}"></label>`:''}
 <div class="lbl" style="color:var(--yellow-ink)">Payment received</div>
-<div class="chips"><button type="button" class="chip" data-pp="pending">Pending</button><button type="button" class="chip" data-pp="paid">Paid</button></div>
-${pi.status==='partial'?`<p class="hint" style="margin:0 0 10px">Part of the bill was received earlier. Choose Paid when the rest has been received.</p>`:''}
+<div class="chips"><button type="button" class="chip" data-pp="pending">Pending</button><button type="button" class="chip" data-pp="cash">Paid by Cash</button><button type="button" class="chip" data-pp="upi">Paid by UPI</button></div>
+${pi.status==='partial'?`<p class="hint" style="margin:0 0 10px">Part of the bill was received earlier. Choose Paid by Cash or Paid by UPI when the rest has been received.</p>`:''}
 <div class="dlg-actions"><button class="btn ghost" id="pNo">Cancel</button><button class="btn primary" id="pOk">Save</button></div>`);
 const dcn=()=>P.disc==='none'?{t:'none',v:0}:P.disc==='custom'?{t:$('#pDcType').value==='amt'?'amt':'pct',v:num($('#pDcVal').value)}:{t:'pct',v:Number(P.disc)};
 const discAmt=()=>{const d=dcn();return d.t==='pct'?Math.round(base*Math.min(100,d.v)/100):d.t==='amt'?Math.min(base,Math.round(d.v)):0};
@@ -719,7 +722,7 @@ const calc=()=>{
 let bill=pi.bill,d=0,adj=0,total=0;
 if(adm){d=discAmt();adj=Number($('#pAdj').value)||0;total=base-d+other;bill=total+ext+adj}
 const already=adm?Math.min(bill,b.paidAmount||0):Math.min(pi.bill,pi.bill-pi.due);
-const after=!P.touched?Math.max(0,bill-already):P.pay==='paid'?0:bill;
+const after=!P.touched?Math.max(0,bill-already):P.pay!=='pending'?0:bill;
 $$('#dlgBody [data-pp]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.pp===P.pay)));
 if(adm){
 $$('#dlgBody [data-pd]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.pd===P.disc)));
@@ -745,10 +748,15 @@ $('#pNo').onclick=closeDlg;
 $('#pOk').onclick=()=>{
 const r=calc();
 if(adm){
-const d=dcn(),paidAmt=!P.touched?r.already:(P.pay==='paid'?r.bill:0);
-B.setBilling(id,{startAt:s.startAt,discType:d.t,discVal:d.v,discount:r.d,total:r.total,adjust:r.adj,paidAmount:paidAmt,paidAt:Date.now(),paidBy:me.name}).catch(writeErr);
+const d=dcn();let paidAmt,cash=b.cash||0,upi=b.upi||0,card=b.cardAmt||0;
+if(!P.touched){
+paidAmt=r.already;let over=cash+upi+card-paidAmt;
+if(over>0){const t1=Math.min(cash,over);cash-=t1;over-=t1;const t2=Math.min(upi,over);upi-=t2;over-=t2;card=Math.max(0,card-over)}
+}else if(P.pay==='pending'){paidAmt=0;cash=0;upi=0;card=0}
+else{paidAmt=r.bill;cash=P.pay==='cash'?r.bill:0;upi=P.pay==='upi'?r.bill:0;card=0}
+B.setBilling(id,{startAt:s.startAt,discType:d.t,discVal:d.v,discount:r.d,total:r.total,adjust:r.adj,paidAmount:paidAmt,cash,upi,cardAmt:card,paidAt:Date.now(),paidBy:me.name}).catch(writeErr);
 }else if(P.touched){
-B.setPaid(id,P.pay==='paid',me.name).catch(writeErr);
+B.setPaid(id,P.pay!=='pending',me.name,P.pay==='upi'?'upi':'cash').catch(writeErr);
 }
 closeDlg();toast(P.touched||adm?'Payment saved.':'No change.');
 };
@@ -766,7 +774,7 @@ socks:g.socks,remark:g.remark,baseMin:g.min,durationMin:g.min,startAt:now,extens
 B.createGuest(guest).then(()=>{
 if(g.phone)B.saveContact(id,{phone:g.phone,startAt:now}).catch(()=>{});
 B.createBilling(id,{startAt:now,play:b.play,socks:b.sock,card:b.card,discount:b.discount,discType:dc.t,discVal:dc.v,total:b.total,
-paid:!!g.paid,paidBy:me.name}).catch(writeErr);
+paid:!!g.paid,payMethod:g.payMethod||'cash',paidBy:me.name}).catch(writeErr);
 }).catch(writeErr);
 return guest;
 }
@@ -783,9 +791,7 @@ $('#entryBody').innerHTML=`
 <div class="two"><label class="field"><span>Customer name</span><input id="eName" list="nameList" autocomplete="off" maxlength="60" placeholder="Type the name"></label>
 <label class="field"><span>Phone (optional)</span><input id="ePhone" type="tel" autocomplete="off" maxlength="20" inputmode="tel"></label></div>
 <p class="hintline" id="eHint"></p>
-<div class="lbl">Number of players</div><div class="stepper" style="margin-bottom:12px;max-width:220px"><button type="button" data-step="-1" aria-label="Fewer players">\u2212</button><input id="ePlayers" type="number" min="1" max="30" value="1" inputmode="numeric"><button type="button" data-step="1" aria-label="More players">+</button></div>
-<div class="lbl">Time</div>${chipRow('min',[30,60,120,'custom'],v=>v==='custom'?'Custom':v===30?'30 min':v===60?'1 hour':'2 hours')}
-<label class="field" id="eCustomWrap" hidden><span>Custom minutes</span><input id="eMin" type="number" min="5" step="5" value="45" inputmode="numeric"></label>
+<div class="lbl">Time</div>${chipRow('min',[30,60,120],v=>v===30?'30 min':v===60?'1 hour':'2 hours')}
 <div class="lbl" id="cardLbl">Card type</div>${chipRow('card',CARDS)}
 <div id="bdayWrap" hidden><div class="lbl">Birthday free play (one player plays free)</div>${chipRow('bday',['no','yes'],v=>v==='yes'?'Yes':'No')}</div>
 <div class="lbl">Socks size</div>${chipRow('socks',SOCKS)}
@@ -794,14 +800,14 @@ $('#entryBody').innerHTML=`
 <label class="field"><span>Type</span><select id="dcType"><option value="pct">Percent (%)</option><option value="amt">Amount (${esc(settings.currency)})</option></select></label></div></div>
 <label class="field"><span>Remark (optional)</span><textarea id="eRem" maxlength="160" placeholder="Wristband number, party, allergies..."></textarea></label>
 <div class="bill" id="eBill"></div>
-<div class="lbl" style="color:var(--yellow-ink)">Payment received</div>${chipRow('pay',['pending','paid'],v=>v==='paid'?'Paid':'Pending')}
+<div class="lbl" style="color:var(--yellow-ink)">Payment received</div>${chipRow('pay',['pending','cash','upi'],v=>PAYCHIP[v])}
 <div class="dlg-actions"><button class="btn ghost" data-close>Cancel</button><button class="btn primary big" id="eGo">Start timer</button></div>`;
 const nm=customers();
 $('#nameList').innerHTML=Object.keys(nm).slice(0,400).map(k=>`<option value="${esc(nm[k].name)}"></option>`).join('');
 edlg.showModal();syncEntry();
 setTimeout(()=>{try{$('#eName').focus()}catch(e){}},50);
 }
-const entryMin=()=>entry.min==='custom'?(parseInt($('#eMin').value,10)||0):entry.min;
+const entryMin=()=>entry.min;
 function entryDisc(){
 if(!isAdmin()||entry.disc==='none')return {t:'none',v:0};
 if(entry.disc==='custom')return {t:$('#dcType').value==='amt'?'amt':'pct',v:num($('#dcVal').value)};
@@ -813,26 +819,23 @@ $$('#entryBody [data-k]').forEach(b=>{
 let cur=entry[b.dataset.k];if(b.dataset.k==='bday')cur=cur?'yes':'no';
 b.setAttribute('aria-pressed',String(String(cur)===b.dataset.v));
 });
-$('#eCustomWrap').hidden=entry.min!=='custom';
 $('#bdayWrap').hidden=entry.card!=='Premium';
 $('#dcWrap').hidden=entry.disc!=='custom';
 $('#cardLbl').textContent=entry.ctype==='new'?'Card type (new card)':'Card type (their existing card)';
 const min=entryMin(),b=calcBill(entry,min,entryDisc()),m=money;
-const rows=[`<div class="r"><span>${esc(AREAS[entry.area].label)} \u00B7 ${esc(min?fmtMin(min):'-')}</span><b>${m(b.fee)} \u00D7 ${b.n-b.freeN}${b.freeN?' (1 free)':''}</b></div>`];
-if(b.sock)rows.push(`<div class="r"><span>Socks (${esc(entry.socks)})</span><b>${m(b.sockUnit)} \u00D7 ${b.n}</b></div>`);
+const rows=[`<div class="r"><span>${esc(AREAS[entry.area].label)} \u00B7 ${esc(min?fmtMin(min):'-')}</span><b>${b.freeN?'Free (birthday)':m(b.fee)}</b></div>`];
+if(b.sock)rows.push(`<div class="r"><span>Socks (${esc(entry.socks)})</span><b>${m(b.sockUnit)}</b></div>`);
 if(b.discount)rows.push(`<div class="r"><span>Discount on play time</span><b>\u2212${m(b.discount)}</b></div>`);
 if(b.card)rows.push(`<div class="r"><span>${esc(entry.card)} card (new customer)</span><b>${m(b.card)}</b></div>`);
 rows.push(`<div class="r tot"><span>Bill amount</span><b>${m(b.total)}</b></div>`);
-rows.push(`<div class="r"><span>Amount due after payment</span><b>${entry.pay==='paid'?m(0):m(b.total)}</b></div>`);
+rows.push(`<div class="r"><span>Amount due after payment</span><b>${entry.pay!=='pending'?m(0):m(b.total)}</b></div>`);
 $('#eBill').innerHTML=rows.join('');
 }
 edlg.addEventListener('click',e=>{
 if(e.target.closest('[data-close]')){edlg.close();return}
-const st=e.target.closest('[data-step]');
-if(st){const p=$('#ePlayers');p.value=Math.min(30,Math.max(1,(parseInt(p.value,10)||1)+Number(st.dataset.step)));entry.players=Number(p.value);syncEntry();return}
 const k=e.target.closest('[data-k]');
 if(k){const key=k.dataset.k,v=k.dataset.v;
-if(key==='min')entry.min=v==='custom'?'custom':Number(v);
+if(key==='min')entry.min=Number(v);
 else if(key==='disc')entry.disc=(v==='none'||v==='custom')?v:Number(v);
 else if(key==='bday')entry.bday=v==='yes';
 else entry[key]=v;
@@ -843,8 +846,7 @@ if(e.target.id==='eGo')startGuest();
 });
 edlg.addEventListener('input',e=>{
 const id=e.target.id;
-if(id==='ePlayers'){entry.players=Math.max(1,parseInt(e.target.value,10)||1);syncEntry()}
-else if(id==='eName'){nameHint(true)}
+if(id==='eName'){nameHint(true)}
 else syncEntry();
 });
 edlg.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.target.id==='eName'||e.target.id==='ePhone')){e.preventDefault();startGuest()}});
@@ -868,7 +870,7 @@ if(!min||min<5){toast('Enter at least 5 minutes.',true);return}
 const dc=entryDisc(),adm=isAdmin();
 const g=commitGuest({area:entry.area,name,phone:$('#ePhone').value.trim(),players:entry.players,ctype:entry.ctype,card:entry.card,bday:entry.bday,
 socks:entry.socks,remark:$('#eRem').value.trim(),min,discType:dc.t,discVal:dc.v,
-paid:entry.pay==='paid'},nextTicket(0),Date.now());
+paid:entry.pay!=='pending',payMethod:entry.pay},nextTicket(0),Date.now());
 edlg.close();
 toast(`${name} checked in: ${AREAS[g.area].label}, ${fmtMin(min)}.`);
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
@@ -878,9 +880,9 @@ const newRow=prev=>({name:'',phone:'',players:1,area:prev?prev.area:lastArea,min
 bday:'no',socks:prev?prev.socks:'No socks',remark:'',disc:'none',dcVal:0,dcType:'pct'});
 let bulkPay='pending';
 function rowCalc(r){
-const min=r.min==='custom'?(parseInt(r.custom,10)||0):Number(r.min);
+const min=Number(r.min);
 const dc=!isAdmin()||r.disc==='none'?{t:'none',v:0}:r.disc==='custom'?{t:r.dcType==='amt'?'amt':'pct',v:num(r.dcVal)}:{t:'pct',v:Number(r.disc)};
-const b=calcBill({area:r.area,card:r.card,ctype:r.ctype,socks:r.socks,bday:r.card==='Premium'&&r.bday==='yes',players:Math.max(1,parseInt(r.players,10)||1)},min,dc);
+const b=calcBill({area:r.area,card:r.card,ctype:r.ctype,socks:r.socks,bday:r.card==='Premium'&&r.bday==='yes',players:1},min,dc);
 return {min,dc,b};
 }
 function rowHTML(r,i){
@@ -890,10 +892,8 @@ return `<div class="brow" data-i="${i}">
 <div class="bgrid">
 <label class="field"><span>Name</span><input data-f="name" maxlength="60" value="${esc(r.name)}" placeholder="Participant name"></label>
 <label class="field"><span>Phone</span><input data-f="phone" type="tel" maxlength="20" value="${esc(r.phone)}"></label>
-<label class="field"><span>Players</span><input data-f="players" type="number" min="1" max="30" value="${esc(r.players)}"></label>
 <label class="field"><span>Play area</span>${sel('area',AREA_KEYS,v=>AREAS[v].label)}</label>
-<label class="field"><span>Time</span>${sel('min',['30','60','120','custom'],v=>v==='custom'?'Custom':v==='30'?'30 min':v==='60'?'1 hour':'2 hours')}</label>
-<label class="field" data-cw${r.min==='custom'?'':' hidden'}><span>Custom minutes</span><input data-f="custom" type="number" min="5" step="5" value="${esc(r.custom)}"></label>
+<label class="field"><span>Time</span>${sel('min',['30','60','120'],v=>v==='30'?'30 min':v==='60'?'1 hour':'2 hours')}</label>
 <label class="field"><span>Customer</span>${sel('ctype',['new','existing'],v=>v==='new'?'New':'Existing')}</label>
 <label class="field"><span>Card</span>${sel('card',CARDS)}</label>
 <label class="field" data-bw${r.card==='Premium'?'':' hidden'}><span>Birthday free play</span>${sel('bday',['no','yes'],v=>v==='yes'?'Yes':'No')}</label>
@@ -913,18 +913,17 @@ bulk.forEach((r,i)=>updateRow(i));updateBulkTotals();
 function updateRow(i){
 const r=bulk[i],el=$(`.brow[data-i="${i}"]`);if(!el)return;
 const c=rowCalc(r);
-$('[data-cw]',el).hidden=r.min!=='custom';$('[data-bw]',el).hidden=r.card!=='Premium';
+$('[data-bw]',el).hidden=r.card!=='Premium';
 const dw=$('[data-dw]',el);if(dw)dw.hidden=r.disc!=='custom';
 const due=$('[data-due]',el);if(due)due.textContent=money(c.b.total);
 }
 function syncBulkPay(){$$('#bulkBody [data-bpay]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.bpay===bulkPay)))}
 function updateBulkTotals(){
 const rows=bulk.filter(r=>r.name.trim()),cs=rows.map(rowCalc),total=sum(cs,c=>c.b.total);
-const players=sum(rows,r=>Math.max(1,parseInt(r.players,10)||1));
 syncBulkPay();
-$('#bulkTot').innerHTML=`<div class="r"><span>Participants</span><b>${rows.length} (${players} player${players===1?'':'s'})</b></div>`+
+$('#bulkTot').innerHTML=`<div class="r"><span>Participants</span><b>${rows.length}</b></div>`+
 `<div class="r"><span>Total bill amount</span><b>${money(total)}</b></div>`+
-`<div class="r tot"><span>Amount due after payment</span><b>${bulkPay==='paid'?money(0):money(total)}</b></div>`;
+`<div class="r tot"><span>Amount due after payment</span><b>${bulkPay!=='pending'?money(0):money(total)}</b></div>`;
 }
 function openBulk(){
 if(!canWrite())return;
@@ -934,7 +933,7 @@ $('#bulkBody').innerHTML=`<div class="dlg-head"><h2>Bulk entry</h2><button class
 <div id="bulkRows"></div>
 <div class="acts" style="margin:6px 0 14px"><button class="btn ghost" data-badd="1">+ Add row</button><button class="btn ghost" data-badd="5">+ Add 5 rows</button><button class="btn ghost" data-bcopy="1">Copy last row</button></div>
 <div class="lbl" style="color:var(--yellow-ink)">Payment received for the whole group (one choice for everyone)</div>
-<div class="chips"><button type="button" class="chip" data-bpay="pending">Pending</button><button type="button" class="chip" data-bpay="paid">Paid</button></div>
+<div class="chips"><button type="button" class="chip" data-bpay="pending">Pending</button><button type="button" class="chip" data-bpay="cash">Paid by Cash</button><button type="button" class="chip" data-bpay="upi">Paid by UPI</button></div>
 <div class="bill" id="bulkTot"></div>
 <div class="dlg-actions"><button class="btn ghost" data-bclose>Cancel</button><button class="btn primary big" id="bulkGo">Start all timers</button></div>`;
 bdlg.showModal();renderBulk();
@@ -962,8 +961,8 @@ for(const x of rows){const c=rowCalc(x.r);if(!c.min||c.min<5){toast('Participant
 const now=Date.now(),t0=nextTicket(0);
 rows.forEach((x,n)=>{
 const c=rowCalc(x.r),r=x.r;
-commitGuest({area:r.area,name:r.name.trim(),phone:r.phone.trim(),players:Math.max(1,parseInt(r.players,10)||1),ctype:r.ctype,card:r.card,bday:r.bday==='yes',
-socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,paid:bulkPay==='paid'},t0+n,now);
+commitGuest({area:r.area,name:r.name.trim(),phone:r.phone.trim(),players:1,ctype:r.ctype,card:r.card,bday:r.bday==='yes',
+socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,paid:bulkPay!=='pending',payMethod:bulkPay},t0+n,now);
 });
 bdlg.close();toast(rows.length+' participant'+(rows.length>1?'s':'')+' checked in.');
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
@@ -978,7 +977,7 @@ return match(s,st,{skipStatus:!!need});
 }
 function renderRecords(){
 $('#recTitle').textContent=TITLES[tab]||'Customers';
-const rows=records(),now=Date.now(),adm=isAdmin(),cols=adm?16:me?14:12;
+const rows=records(),now=Date.now(),adm=isAdmin(),cols=adm?17:me?14:12;
 $('#rBody').innerHTML=rows.length?rows.map(s=>{
 const extra=sum(s.extensions,x=>x.min);let tag,out;
 if(s.status==='active'){const o=endOf(s)<=now;tag=`<span class="tag ${o?'up':'play'}">${o?'Time\u2019s up':'Playing'}</span>`;out='Playing'}
@@ -999,6 +998,7 @@ return `<tr><td>${esc(ticketStr(s.ticket))}<span class="sub">${esc(dateStr(s.sta
 <td class="num">${esc(fmtMin(s.durationMin))}${extra?`<span class="sub">incl. +${esc(fmtMin(extra))}</span>`:''}${s.editedBy?`<span class="sub">edited</span>`:''}</td>
 <td>${esc(clockStr(s.startAt))} \u2192 ${esc(out)}</td>
 <td class="num adm"><span class="${cls}">${esc(money(dueOf(s)))}</span>${discOf(s)?`<span class="sub">\u2212${esc(money(discOf(s)))} off</span>`:''}</td>
+<td class="adm">${canc?'-':esc(methodOf(s)||'-')}</td>
 <td class="num stf">${pi&&!canc?esc(money(pi.due)):'-'}</td>
 <td class="stf">${pi&&!canc?`<span class="tag pay-${pi.status}">${STATUS_LABEL[pi.status]}</span>`:'-'}</td>
 <td>${tag}</td>
@@ -1025,12 +1025,12 @@ setTimeout(()=>URL.revokeObjectURL(url),2000);toast('CSV downloaded.');
 $('#csvBtn').addEventListener('click',()=>{
 const rows=records();if(!rows.length){toast('Nothing to export for these filters.',true);return}
 const head=['Ticket','Date','Customer'].concat(me?['Phone']:[],['Area','Players','Customer type','Card','Socks','Birthday free play','Booked (min)','Extra (min)','Status','In','Out','Cancel reason','Remark']);
-if(isAdmin())head.push('Bill amount','Discount','Amount due','Payment','Entered by');else if(me)head.push('Amount due','Payment');
+if(isAdmin())head.push('Bill amount','Discount','Amount due','Payment','Paid by','Entered by');else if(me)head.push('Amount due','Payment');
 exportCsv('ufh-'+tab+'-'+new Date().toISOString().slice(0,10)+'.csv',head,rows.map(s=>{
 const extra=sum(s.extensions,x=>x.min),out=s.endedAt||s.cancelledAt;
 const r=[ticketStr(s.ticket),new Date(s.startAt).toLocaleDateString(),s.name].concat(me?[phoneOf(s)]:[],[AREAS[s.area].label,s.players,s.ctype,s.card,s.socks,s.bday?'Yes':'No',s.durationMin-extra,extra,s.status,clockStr(s.startAt),out?clockStr(out):'',s.cancelReason,s.remark]);
 const c=s.status==='cancelled',pi=payInfo(s);
-if(isAdmin())r.push(c?0:dueOf(s),discOf(s),c?0:owedOf(s),c||!pi?'':STATUS_LABEL[pi.status],s.by||'');
+if(isAdmin())r.push(c?0:dueOf(s),discOf(s),c?0:owedOf(s),c||!pi?'':STATUS_LABEL[pi.status],c?'':methodOf(s),s.by||'');
 else if(me)r.push(c||!pi?'':pi.due,c||!pi?'':STATUS_LABEL[pi.status]);
 return r;
 }));
@@ -1073,11 +1073,11 @@ function renderStats(){
 if(!isAdmin())return;
 const st=FS.stats,all=sessions.filter(s=>match(s,st,{skipStatus:true}));
 const rows=all.filter(s=>s.status!=='cancelled'),canc=all.filter(s=>s.status==='cancelled');
-const paid=sum(rows,paidOf),due=sum(rows,dueOf),owed=sum(rows,owedOf),disc=sum(rows,discOf);
+const paid=sum(rows,paidOf),due=sum(rows,dueOf),owed=sum(rows,owedOf),disc=sum(rows,discOf),cashT=sum(rows,cashOf),upiT=sum(rows,upiOf),cardT=sum(rows,cardOf),unk=Math.max(0,paid-cashT-upiT-cardT);
 const done=rows.filter(s=>s.status==='completed'&&s.endedAt);
 const avg=done.length?sum(done,s=>(s.endedAt-s.startAt)/60000)/done.length:0;
 const extRev=sum(rows,s=>bl(s).extTotal||0);
-$('#statCards').innerHTML=[[money(paid),'total received (paid)'],[money(due),'total bill amount'],[money(owed),'amount due (pending)'],[money(disc),'discounts given'],[rows.length,'check-ins'],[sum(rows,s=>s.players),'players'],
+$('#statCards').innerHTML=[[money(paid),'total received (paid)'],[money(cashT),'received in cash'],[money(upiT),'received by UPI'],[money(due),'total bill amount'],[money(owed),'amount due (pending)'],[money(disc),'discounts given'],[rows.length,'check-ins'],[sum(rows,s=>s.players),'players'],
 [money(rows.length?paid/rows.length:0),'average received per check-in'],[avg?fmtMin(avg):'-','average time played'],[rows.filter(s=>s.bday).length,'birthday free plays'],[canc.length,'cancelled (not counted)']]
 .map(c=>`<div class="stat"><b>${esc(c[0])}</b><span>${esc(c[1])}</span></div>`).join('');
 $('#areaPanels').innerHTML=AREA_KEYS.map(a=>{
@@ -1100,7 +1100,7 @@ bars($('#hourChart'),it);
 const playRev=sum(rows,s=>bl(s).play||0),sockRev=sum(rows,s=>bl(s).socks||0),cardRev=sum(rows,s=>bl(s).card||0);
 const adj=sum(rows,s=>bl(s).adjust||0);
 lines($('#revLines'),[['Play fees',playRev],['Socks',sockRev],['Card sales',cardRev],['Extra time',extRev],['Discounts',-disc],['Adjustments',adj]].filter(e=>e[1]!==0),v=>money(v));
-lines($('#payLines'),[['Paid',rows.filter(s=>owedOf(s)<=0).length],['Pending',rows.filter(s=>owedOf(s)>0).length]].filter(e=>e[1]>0));
+lines($('#payLines'),[['Cash received',cashT],['UPI received',upiT],['Card (older entries)',cardT],['Method not recorded',unk],['Pending (due)',owed]].filter(e=>e[1]>0),v=>money(v));
 lines($('#cardLines'),CARDS.map(c=>[c,rows.filter(s=>s.card===c).length]).filter(e=>e[1]>0));
 lines($('#sockLines'),SOCKS.map(k=>[k,sum(rows.filter(s=>s.socks===k),s=>s.players)]).filter(e=>e[1]>0));
 const dl=s=>{const b=bl(s);return b.discType==='amt'?'Custom '+money(b.discVal):b.discType==='pct'?b.discVal+'% off':'No discount'};
