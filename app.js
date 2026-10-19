@@ -35,7 +35,7 @@ let sessions=[],billing={},contacts={},staffList=[],pstat={};
 let recovering=false;
 let loaded=false,tab='dash',entry=null,lastArea='trampoline',bulk=[];
 let remindAt={},muted={},lastAlertKey='',lastOverSig='';
-let soundOn=true,audio=null;
+let soundOn=true,audio=null,entryClock=null,bulkClock=null,bulkStartTouched=false;
 let unsubs=[],unsubG=null,unsubB=null,unsubC=null,unsubP=null;
 let loadDays=30;
 const banners={};
@@ -231,6 +231,8 @@ subContacts:(since,cb,err)=>live('contacts','id',()=>fetchAll(()=>client.from('c
 r=>[r.id,r.phone||''],st=>cb(Object.fromEntries(st)),err),
 subPayStatus:(since,cb,err)=>live('payment_status','id',()=>fetchAll(()=>client.from('payment_status').select('*').gte('start_at',since||0).order('id')),
 r=>[r.id,{due:Number(r.due),balance:Number(r.balance),status:r.status}],st=>cb(Object.fromEntries(st)),err),
+setPayMethod:async(id,m)=>{await ok(client.rpc('billing_set_method',{p_id:id,p_method:m}))},
+updateItems:async(id,o)=>{await ok(client.rpc('billing_update_items',{p_id:id,p_play:o.play,p_socks:o.socks,p_card:o.card}))},
 setPaid:async(id,paid,by,method)=>{await ok(client.rpc('billing_set_paid',{p_id:id,p_paid:!!paid,p_by:by||'',p_method:method||'cash'}))},
 subBilling:(since,cb,err)=>live('billing','id',()=>fetchAll(()=>client.from('billing').select('*').gte('start_at',since||0).order('id')),
 r=>[r.id,fromBill(r)],st=>cb(Object.fromEntries(st)),err),
@@ -539,7 +541,7 @@ if(pi)facts.push(`<span class="fact pay-${pi.status}">${STATUS_LABEL[pi.status]}
 const ph=phoneOf(s);
 return `<article class="guest" data-id="${esc(s.id)}" data-area="${esc(s.area)}" data-start="${s.startAt}" data-end="${endOf(s)}" data-state="ok">
 <div class="g-top"><div><span class="areatag">${esc(AREAS[s.area].label)}</span><h3>${esc(s.name)}</h3>
-<p class="meta">In at ${esc(clockStr(s.startAt))} \u00B7 ${esc(fmtMin(s.durationMin))} booked${ph?' \u00B7 '+esc(ph):''}</p></div><span class="badge">Playing</span></div>
+<p class="meta"><span class="stw">${s.startAt>Date.now()?'Starts':'In'}</span> at ${esc(clockStr(s.startAt))} \u00B7 ${esc(fmtMin(s.durationMin))} booked${ph?' \u00B7 '+esc(ph):''}</p></div><span class="badge">Playing</span></div>
 <div class="timer">--:--</div><div class="track"><span></span></div>
 <div class="facts">${facts.join('')}</div>
 ${s.remark?`<p class="remark">\u201C${esc(s.remark)}\u201D</p>`:''}
@@ -595,12 +597,14 @@ $('#clock').textContent=new Date(now).toLocaleTimeString([], {hour:'numeric',min
 const sig=overdueList(now).map(s=>s.id+':'+endOf(s)).join('|');
 if(sig!==lastOverSig){lastOverSig=sig;renderAll();return}
 $$('.guest').forEach(el=>{
-const st=+el.dataset.start,en=+el.dataset.end,rem=Math.round((en-now)/1000);
-const state=rem<=0?'over':rem<=settings.warnMin*60?'soon':'ok';
+const st=+el.dataset.start,en=+el.dataset.end,waiting=now<st;
+const rem=waiting?Math.round((en-st)/1000):Math.round((en-now)/1000);
+const state=waiting?'ok':(rem<=0?'over':rem<=settings.warnMin*60?'soon':'ok');
 if(el.dataset.state!==state)el.dataset.state=state;
-$('.badge',el).textContent=state==='over'&&rem<=-60?'Over '+fmtMin(Math.floor(-rem/60)):LABEL[state];
+$('.badge',el).textContent=waiting?'Starts in '+fmtMin(Math.ceil((st-now)/60000)):(state==='over'&&rem<=-60?'Over '+fmtMin(Math.floor(-rem/60)):LABEL[state]);
 $('.timer',el).textContent=(rem<0?'+':'')+fmtHMS(rem);
-$('.track span',el).style.width=Math.min(100,Math.max(0,(now-st)/(en-st)*100))+'%';
+const sw=$('.stw',el);if(sw)sw.textContent=waiting?'Starts':'In';
+$('.track span',el).style.width=waiting?'0%':Math.min(100,Math.max(0,(now-st)/(en-st)*100))+'%';
 });
 runReminders(now);
 }
@@ -660,14 +664,15 @@ closeDlg();toast(s.name+': added '+m+' min.');
 }
 function openEdit(id){
 const s=getS(id);if(!s||!canWrite())return;
-openDlg(`<h2>Edit ${esc(ticketStr(s.ticket))}</h2><p class="sub-line">Change any guest detail or the times. ${isAdmin()?'Use the Payment button to change money.':'Money is handled by the admin.'}</p>
+const curPm=isAdmin()?(cashOf(s)>=upiOf(s)&&cashOf(s)>0?'cash':upiOf(s)>0?'upi':''):'';
+openDlg(`<h2>Edit ${esc(ticketStr(s.ticket))}</h2><p class="sub-line">Change any guest detail or the times. Changing the socks size, card, play area or birthday free play also updates the bill, even after the participant has finished. ${isAdmin()?'Use the Payment button for discounts and Paid / Pending.':''}</p>
 <label class="field"><span>Customer name</span><input id="eeName" maxlength="60" value="${esc(s.name)}"></label>
 <div class="two"><label class="field"><span>Phone</span><input id="eePhone" type="tel" maxlength="20" value="${esc(phoneOf(s))}"></label>
 <label class="field"><span>Play area</span><select id="eeArea">${AREA_KEYS.map(a=>`<option value="${a}"${a===s.area?' selected':''}>${AREAS[a].label}</option>`).join('')}</select></label></div>
-<div class="two"><label class="field"><span>Customer type</span><select id="eeType"><option value="new"${s.ctype==='new'?' selected':''}>New</option><option value="existing"${s.ctype==='existing'?' selected':''}>Existing</option></select></label>
-<label class="field"><span>Players</span><input id="eePl" type="number" min="1" max="30" value="${s.players}"></label></div>
+<label class="field"><span>Customer type</span><select id="eeType"><option value="new"${s.ctype==='new'?' selected':''}>New</option><option value="existing"${s.ctype==='existing'?' selected':''}>Existing</option></select></label>
 <div class="two"><label class="field"><span>Card</span><select id="eeCard">${opts(CARDS,s.card)}</select></label>
 <label class="field"><span>Socks size</span><select id="eeSock">${opts(SOCKS,s.socks)}</select></label></div>
+<label class="field"><span>Payment method (Cash or UPI)</span><select id="eePm">${isAdmin()?`<option value=""${curPm?'':' selected'}>Not set</option>`:'<option value="">Leave as it is</option>'}<option value="cash"${curPm==='cash'?' selected':''}>Cash</option><option value="upi"${curPm==='upi'?' selected':''}>UPI</option></select></label>
 <label class="field"><span>Birthday free play</span><select id="eeBday"><option value="no"${s.bday?'':' selected'}>No</option><option value="yes"${s.bday?' selected':''}>Yes</option></select></label>
 <div class="lbl" style="margin-top:4px;color:var(--yellow-ink)">Time</div>
 <div class="two"><label class="field"><span>Check-in time</span><input id="eeIn" type="datetime-local" value="${toLocalInput(s.startAt)}"></label>
@@ -681,13 +686,20 @@ const n=$('#eeName').value.trim();if(!n){toast('Name cannot be empty.',true);ret
 const sIn=new Date($('#eeIn').value).getTime(),mins=Math.round(Number($('#eeMin').value));
 if(!sIn){toast('Enter a valid check-in time.',true);return}
 if(!mins||mins<5){toast('Booked time must be at least 5 minutes.',true);return}
-const card=$('#eeCard').value,f={name:n,area:$('#eeArea').value,ctype:$('#eeType').value,players:Math.max(1,parseInt($('#eePl').value,10)||1),card,
+const card=$('#eeCard').value,f={name:n,area:$('#eeArea').value,ctype:$('#eeType').value,card,
 socks:$('#eeSock').value,bday:card==='Premium'&&$('#eeBday').value==='yes',remark:$('#eeRem').value.trim(),
 startAt:sIn,durationMin:mins,editedBy:me.name,editedAt:Date.now()};
 if(s.status==='completed'&&$('#eeOut')){const o=new Date($('#eeOut').value).getTime();if(o&&o<sIn){toast('Check-out must be after check-in.',true);return}if(o)f.endedAt=o}
 B.patchGuest(id,f).catch(writeErr);
 B.saveContact(id,{phone:$('#eePhone').value.trim(),startAt:sIn}).catch(()=>{});
-closeDlg();toast('Saved.');
+const changed=f.area!==s.area||f.card!==s.card||f.ctype!==s.ctype||f.socks!==s.socks||f.bday!==s.bday;
+if(changed){
+const nb=calcBill({area:f.area,card:f.card,ctype:f.ctype,socks:f.socks,bday:f.bday,players:s.players},s.baseMin||s.durationMin,{t:'none',v:0});
+B.updateItems(id,{play:nb.play,socks:nb.sock,card:nb.card}).catch(writeErr);
+}
+const pm=$('#eePm').value;
+if(pm&&(!isAdmin()||pm!==curPm))B.setPayMethod(id,pm).catch(writeErr);
+closeDlg();toast(changed?'Saved. The bill was updated for the changes.':'Saved.');
 };
 }
 function openDelete(id){
@@ -781,7 +793,7 @@ return guest;
 const chipRow=(key,items,fmt)=>`<div class="chips">${items.map(v=>`<button type="button" class="chip" data-k="${key}" data-v="${esc(v)}">${esc(fmt?fmt(v):v)}</button>`).join('')}</div>`;
 function openEntry(){
 if(!canWrite())return;
-entry={area:lastArea,ctype:'new',min:60,card:'Basic',bday:false,socks:'No socks',disc:'none',pay:'pending',players:1};
+entry={area:lastArea,ctype:'new',min:60,card:'Basic',bday:false,socks:'No socks',disc:'none',pay:'pending',players:1,startTouched:false};
 $('#entryBody').innerHTML=`
 <div class="dlg-head"><h2>New check-in</h2><button class="xbtn" data-close aria-label="Close">\u2715</button></div>
 <div class="lbl">Play area</div><div class="atiles">
@@ -791,7 +803,11 @@ $('#entryBody').innerHTML=`
 <div class="two"><label class="field"><span>Customer name</span><input id="eName" list="nameList" autocomplete="off" maxlength="60" placeholder="Type the name"></label>
 <label class="field"><span>Phone (optional)</span><input id="ePhone" type="tel" autocomplete="off" maxlength="20" inputmode="tel"></label></div>
 <p class="hintline" id="eHint"></p>
-<div class="lbl">Time</div>${chipRow('min',[30,60,120],v=>v===30?'30 min':v===60?'1 hour':'2 hours')}
+<div class="lbl">Time</div>${chipRow('min',[30,60,120,'custom'],v=>v==='custom'?'Custom':v===30?'30 min':v===60?'1 hour':'2 hours')}
+<label class="field" id="eCustomWrap" hidden><span>Custom minutes</span><input id="eMin" type="number" min="5" step="5" value="45" inputmode="numeric"></label>
+<div class="lbl">Check-in time (when the participant goes in)</div>
+<div class="two"><label class="field"><span>Goes in at</span><input id="eStart" type="datetime-local"></label>
+<div class="field"><span>Quick change</span><div class="acts"><button type="button" class="mini" data-st="0">Now</button><button type="button" class="mini" data-st="5">+5 min</button><button type="button" class="mini" data-st="10">+10 min</button><button type="button" class="mini" data-st="15">+15 min</button></div></div></div>
 <div class="lbl" id="cardLbl">Card type</div>${chipRow('card',CARDS)}
 <div id="bdayWrap" hidden><div class="lbl">Birthday free play (one player plays free)</div>${chipRow('bday',['no','yes'],v=>v==='yes'?'Yes':'No')}</div>
 <div class="lbl">Socks size</div>${chipRow('socks',SOCKS)}
@@ -805,9 +821,11 @@ $('#entryBody').innerHTML=`
 const nm=customers();
 $('#nameList').innerHTML=Object.keys(nm).slice(0,400).map(k=>`<option value="${esc(nm[k].name)}"></option>`).join('');
 edlg.showModal();syncEntry();
+$('#eStart').value=toLocalInput(Date.now());
+clearInterval(entryClock);entryClock=setInterval(()=>{if(entry&&!entry.startTouched&&edlg.open&&$('#eStart'))$('#eStart').value=toLocalInput(Date.now())},15000);
 setTimeout(()=>{try{$('#eName').focus()}catch(e){}},50);
 }
-const entryMin=()=>entry.min;
+const entryMin=()=>entry.min==='custom'?(parseInt($('#eMin').value,10)||0):entry.min;
 function entryDisc(){
 if(!isAdmin()||entry.disc==='none')return {t:'none',v:0};
 if(entry.disc==='custom')return {t:$('#dcType').value==='amt'?'amt':'pct',v:num($('#dcVal').value)};
@@ -820,6 +838,7 @@ let cur=entry[b.dataset.k];if(b.dataset.k==='bday')cur=cur?'yes':'no';
 b.setAttribute('aria-pressed',String(String(cur)===b.dataset.v));
 });
 $('#bdayWrap').hidden=entry.card!=='Premium';
+$('#eCustomWrap').hidden=entry.min!=='custom';
 $('#dcWrap').hidden=entry.disc!=='custom';
 $('#cardLbl').textContent=entry.ctype==='new'?'Card type (new card)':'Card type (their existing card)';
 const min=entryMin(),b=calcBill(entry,min,entryDisc()),m=money;
@@ -831,11 +850,14 @@ rows.push(`<div class="r tot"><span>Bill amount</span><b>${m(b.total)}</b></div>
 rows.push(`<div class="r"><span>Amount due after payment</span><b>${entry.pay!=='pending'?m(0):m(b.total)}</b></div>`);
 $('#eBill').innerHTML=rows.join('');
 }
+edlg.addEventListener('close',()=>{clearInterval(entryClock)});
 edlg.addEventListener('click',e=>{
 if(e.target.closest('[data-close]')){edlg.close();return}
+const stb=e.target.closest('[data-st]');
+if(stb){const n=Number(stb.dataset.st);$('#eStart').value=toLocalInput(Date.now()+n*60000);entry.startTouched=n>0;return}
 const k=e.target.closest('[data-k]');
 if(k){const key=k.dataset.k,v=k.dataset.v;
-if(key==='min')entry.min=Number(v);
+if(key==='min')entry.min=v==='custom'?'custom':Number(v);
 else if(key==='disc')entry.disc=(v==='none'||v==='custom')?v:Number(v);
 else if(key==='bday')entry.bday=v==='yes';
 else entry[key]=v;
@@ -846,6 +868,7 @@ if(e.target.id==='eGo')startGuest();
 });
 edlg.addEventListener('input',e=>{
 const id=e.target.id;
+if(id==='eStart'){entry.startTouched=true;return}
 if(id==='eName'){nameHint(true)}
 else syncEntry();
 });
@@ -868,19 +891,25 @@ if(!name){toast('Enter the customer name first.',true);$('#eName').focus();retur
 const min=entryMin();
 if(!min||min<5){toast('Enter at least 5 minutes.',true);return}
 const dc=entryDisc(),adm=isAdmin();
+let startAt=Date.now();
+if(entry.startTouched){
+startAt=new Date($('#eStart').value).getTime();
+if(!startAt){toast('Enter a valid check-in time.',true);return}
+if(Math.abs(startAt-Date.now())>24*3600000){toast('The check-in time must be within 24 hours of now. Check the date.',true);return}
+}
 const g=commitGuest({area:entry.area,name,phone:$('#ePhone').value.trim(),players:entry.players,ctype:entry.ctype,card:entry.card,bday:entry.bday,
 socks:entry.socks,remark:$('#eRem').value.trim(),min,discType:dc.t,discVal:dc.v,
-paid:entry.pay!=='pending',payMethod:entry.pay},nextTicket(0),Date.now());
+paid:entry.pay!=='pending',payMethod:entry.pay},nextTicket(0),startAt);
 edlg.close();
-toast(`${name} checked in: ${AREAS[g.area].label}, ${fmtMin(min)}.`);
+toast(`${name} checked in: ${AREAS[g.area].label}, ${fmtMin(min)}.`+(startAt>Date.now()+60000?' Starts at '+clockStr(startAt)+'.':''));
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
 }
 $('#newBtn').addEventListener('click',openEntry);
 const newRow=prev=>({name:'',phone:'',players:1,area:prev?prev.area:lastArea,min:prev?prev.min:'60',custom:prev?prev.custom:45,ctype:prev?prev.ctype:'new',card:prev?prev.card:'Basic',
-bday:'no',socks:prev?prev.socks:'No socks',remark:'',disc:'none',dcVal:0,dcType:'pct'});
+bday:'no',socks:prev?prev.socks:'No socks',remark:'',disc:'none',dcVal:0,dcType:'pct',start:''});
 let bulkPay='pending';
 function rowCalc(r){
-const min=Number(r.min);
+const min=r.min==='custom'?(parseInt(r.custom,10)||0):Number(r.min);
 const dc=!isAdmin()||r.disc==='none'?{t:'none',v:0}:r.disc==='custom'?{t:r.dcType==='amt'?'amt':'pct',v:num(r.dcVal)}:{t:'pct',v:Number(r.disc)};
 const b=calcBill({area:r.area,card:r.card,ctype:r.ctype,socks:r.socks,bday:r.card==='Premium'&&r.bday==='yes',players:1},min,dc);
 return {min,dc,b};
@@ -893,11 +922,13 @@ return `<div class="brow" data-i="${i}">
 <label class="field"><span>Name</span><input data-f="name" maxlength="60" value="${esc(r.name)}" placeholder="Participant name"></label>
 <label class="field"><span>Phone</span><input data-f="phone" type="tel" maxlength="20" value="${esc(r.phone)}"></label>
 <label class="field"><span>Play area</span>${sel('area',AREA_KEYS,v=>AREAS[v].label)}</label>
-<label class="field"><span>Time</span>${sel('min',['30','60','120'],v=>v==='30'?'30 min':v==='60'?'1 hour':'2 hours')}</label>
+<label class="field"><span>Time</span>${sel('min',['30','60','120','custom'],v=>v==='custom'?'Custom':v==='30'?'30 min':v==='60'?'1 hour':'2 hours')}</label>
+<label class="field" data-cw${r.min==='custom'?'':' hidden'}><span>Custom minutes</span><input data-f="custom" type="number" min="5" step="5" value="${esc(r.custom)}"></label>
 <label class="field"><span>Customer</span>${sel('ctype',['new','existing'],v=>v==='new'?'New':'Existing')}</label>
 <label class="field"><span>Card</span>${sel('card',CARDS)}</label>
 <label class="field" data-bw${r.card==='Premium'?'':' hidden'}><span>Birthday free play</span>${sel('bday',['no','yes'],v=>v==='yes'?'Yes':'No')}</label>
 <label class="field"><span>Socks</span>${sel('socks',SOCKS)}</label>
+<label class="field" style="grid-column:1/-1"><span>Check-in time for this participant (leave empty to use the group time above)</span><input data-f="start" type="datetime-local" value="${esc(r.start)}"></label>
 <label class="field" style="grid-column:1/-1"><span>Remark</span><input data-f="remark" maxlength="160" value="${esc(r.remark)}"></label>
 </div>
 <div class="bpay"><div class="bgrid">
@@ -914,6 +945,7 @@ function updateRow(i){
 const r=bulk[i],el=$(`.brow[data-i="${i}"]`);if(!el)return;
 const c=rowCalc(r);
 $('[data-bw]',el).hidden=r.card!=='Premium';
+const cw=$('[data-cw]',el);if(cw)cw.hidden=r.min!=='custom';
 const dw=$('[data-dw]',el);if(dw)dw.hidden=r.disc!=='custom';
 const due=$('[data-due]',el);if(due)due.textContent=money(c.b.total);
 }
@@ -929,7 +961,10 @@ function openBulk(){
 if(!canWrite())return;
 bulk=[newRow(),newRow(),newRow()];bulkPay='pending';
 $('#bulkBody').innerHTML=`<div class="dlg-head"><h2>Bulk entry</h2><button class="xbtn" data-bclose aria-label="Close">\u2715</button></div>
-<p class="sub-line">Add every participant with their own details. All timers start when you press the button. Rows with no name are skipped.</p>
+<p class="sub-line">Add every participant with their own details. Rows with no name are skipped.</p>
+<div class="lbl">Group check-in time (applies to everyone unless a participant has their own time)</div>
+<div class="two"><label class="field"><span>Goes in at</span><input id="bStart" type="datetime-local"></label>
+<div class="field"><span>Quick change</span><div class="acts"><button type="button" class="mini" data-bst="0">Now</button><button type="button" class="mini" data-bst="5">+5 min</button><button type="button" class="mini" data-bst="10">+10 min</button><button type="button" class="mini" data-bst="15">+15 min</button></div></div></div>
 <div id="bulkRows"></div>
 <div class="acts" style="margin:6px 0 14px"><button class="btn ghost" data-badd="1">+ Add row</button><button class="btn ghost" data-badd="5">+ Add 5 rows</button><button class="btn ghost" data-bcopy="1">Copy last row</button></div>
 <div class="lbl" style="color:var(--yellow-ink)">Payment received for the whole group (one choice for everyone)</div>
@@ -937,9 +972,14 @@ $('#bulkBody').innerHTML=`<div class="dlg-head"><h2>Bulk entry</h2><button class
 <div class="bill" id="bulkTot"></div>
 <div class="dlg-actions"><button class="btn ghost" data-bclose>Cancel</button><button class="btn primary big" id="bulkGo">Start all timers</button></div>`;
 bdlg.showModal();renderBulk();
+bulkStartTouched=false;$('#bStart').value=toLocalInput(Date.now());
+clearInterval(bulkClock);bulkClock=setInterval(()=>{if(!bulkStartTouched&&bdlg.open&&$('#bStart'))$('#bStart').value=toLocalInput(Date.now())},15000);
 }
+bdlg.addEventListener('close',()=>{clearInterval(bulkClock)});
 bdlg.addEventListener('click',e=>{
 if(e.target===bdlg||e.target.closest('[data-bclose]')){bdlg.close();return}
+const bst=e.target.closest('[data-bst]');
+if(bst){const n=Number(bst.dataset.bst);$('#bStart').value=toLocalInput(Date.now()+n*60000);bulkStartTouched=n>0;return}
 const del=e.target.closest('[data-bdel]');
 if(del){bulk.splice(Number(del.dataset.bdel),1);if(!bulk.length)bulk.push(newRow());renderBulk();return}
 const add=e.target.closest('[data-badd]');
@@ -950,6 +990,7 @@ if(bp){bulkPay=bp.dataset.bpay;updateBulkTotals();return}
 if(e.target.id==='bulkGo')submitBulk();
 });
 bdlg.addEventListener('input',e=>{
+if(e.target.id==='bStart'){bulkStartTouched=true;return}
 const row=e.target.closest('.brow'),f=e.target.dataset&&e.target.dataset.f;if(!row||!f)return;
 const i=Number(row.dataset.i);bulk[i][f]=e.target.value;
 updateRow(i);updateBulkTotals();
@@ -959,10 +1000,19 @@ const rows=bulk.map((r,i)=>({r,i})).filter(x=>x.r.name.trim());
 if(!rows.length){toast('Enter at least one participant name.',true);return}
 for(const x of rows){const c=rowCalc(x.r);if(!c.min||c.min<5){toast('Participant '+(x.i+1)+': enter at least 5 minutes.',true);return}}
 const now=Date.now(),t0=nextTicket(0);
+let gStart=now;
+if(bulkStartTouched){gStart=new Date($('#bStart').value).getTime();if(!gStart){toast('Enter a valid group check-in time.',true);return}}
+const starts=[];
+for(const x of rows){
+const t=x.r.start?new Date(x.r.start).getTime():gStart;
+if(!t){toast('Participant '+(x.i+1)+': enter a valid check-in time.',true);return}
+if(Math.abs(t-now)>24*3600000){toast('Participant '+(x.i+1)+': the check-in time must be within 24 hours of now.',true);return}
+starts.push(t);
+}
 rows.forEach((x,n)=>{
 const c=rowCalc(x.r),r=x.r;
 commitGuest({area:r.area,name:r.name.trim(),phone:r.phone.trim(),players:1,ctype:r.ctype,card:r.card,bday:r.bday==='yes',
-socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,paid:bulkPay!=='pending',payMethod:bulkPay},t0+n,now);
+socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,paid:bulkPay!=='pending',payMethod:bulkPay},t0+n,starts[n]);
 });
 bdlg.close();toast(rows.length+' participant'+(rows.length>1?'s':'')+' checked in.');
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
