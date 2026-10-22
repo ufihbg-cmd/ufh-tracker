@@ -71,6 +71,7 @@ const ticketStr=n=>'#'+String(n||0).padStart(3,'0');
 const getS=id=>sessions.find(x=>x.id===id);
 const sum=(a,f)=>a.reduce((n,s)=>n+f(s),0);
 const num=v=>Math.max(0,Number(v)||0);
+const r2=v=>Math.round(v*100)/100;
 function fmtHMS(sec){sec=Math.abs(sec);const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60;const mm=String(m).padStart(2,'0'),ss=String(s).padStart(2,'0');return h?h+':'+mm+':'+ss:mm+':'+ss}
 function fmtMin(min){min=Math.round(min);if(min<60)return min+' min';const h=Math.floor(min/60),m=min%60;return m?h+'h '+m+'m':h+(h===1?' hour':' hours')}
 function toast(msg,bad){const t=document.createElement('div');t.className='toast'+(bad?' bad':'');t.textContent=msg;$('#toasts').appendChild(t);setTimeout(()=>t.remove(),bad?6000:3200)}
@@ -81,7 +82,7 @@ const paidOf=s=>Math.min(dueOf(s),bl(s).paidAmount||0);          // amount recei
 const owedOf=s=>Math.max(0,dueOf(s)-paidOf(s));
 const cashOf=s=>bl(s).cash||0, upiOf=s=>bl(s).upi||0, cardOf=s=>bl(s).cardAmt||0;
 const methodOf=s=>{const p=[];if(cashOf(s)>0)p.push('Cash');if(upiOf(s)>0)p.push('UPI');if(cardOf(s)>0)p.push('Card');if(!p.length&&paidOf(s)>0)p.push('Not recorded');return p.join(' + ')};
-const PAYCHIP={pending:'Pending',cash:'Paid by Cash',upi:'Paid by UPI'};                  // amount still due
+const PAYCHIP={pending:'Pending',cash:'Paid by Cash',upi:'Paid by UPI',part:'Part payment'};                  // amount still due
 const discOf=s=>bl(s).discount||0;
 const statusOf=(bill,rec)=>bill<=0?'paid':rec>=bill?'paid':rec<=0?'pending':'partial';
 const STATUS_LABEL={pending:'Pending',partial:'Pending',paid:'Paid'};
@@ -231,6 +232,8 @@ subContacts:(since,cb,err)=>live('contacts','id',()=>fetchAll(()=>client.from('c
 r=>[r.id,r.phone||''],st=>cb(Object.fromEntries(st)),err),
 subPayStatus:(since,cb,err)=>live('payment_status','id',()=>fetchAll(()=>client.from('payment_status').select('*').gte('start_at',since||0).order('id')),
 r=>[r.id,{due:Number(r.due),balance:Number(r.balance),status:r.status}],st=>cb(Object.fromEntries(st)),err),
+addPayment:async(id,o)=>{await ok(client.rpc('billing_add_payment',{p_id:id,p_cash:o.cash||0,p_upi:o.upi||0,p_by:o.by||''}))},
+setDiscount:async(id,o)=>{await ok(client.rpc('billing_set_discount',{p_id:id,p_type:o.t,p_val:o.v}))},
 setPayMethod:async(id,m)=>{await ok(client.rpc('billing_set_method',{p_id:id,p_method:m}))},
 updateItems:async(id,o)=>{await ok(client.rpc('billing_update_items',{p_id:id,p_play:o.play,p_socks:o.socks,p_card:o.card}))},
 setPaid:async(id,paid,by,method)=>{await ok(client.rpc('billing_set_paid',{p_id:id,p_paid:!!paid,p_by:by||'',p_method:method||'cash'}))},
@@ -256,7 +259,7 @@ if(o.startAt!==undefined)row.start_at=o.startAt;
 await ok(client.from('contacts').upsert(row,{onConflict:'id'}));
 },
 createBilling:async(id,o)=>{
-await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,paid:!!o.paid,pay_method:o.payMethod||'cash',paid_by:o.paidBy}}));
+await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,paid:!!o.paid,pay_method:o.payMethod||'cash',cash_amt:o.cashAmt,upi_amt:o.upiAmt,paid_by:o.paidBy}}));
 },
 setBilling:async(id,o)=>{await ok(client.from('billing').upsert(Object.assign({id},toBill(o)),{onConflict:'id'}))},
 addExtBilling:async(id,price,min)=>{await ok(client.rpc('billing_add_ext',{p_id:id,p_price:price,p_min:min}))},
@@ -665,7 +668,7 @@ closeDlg();toast(s.name+': added '+m+' min.');
 function openEdit(id){
 const s=getS(id);if(!s||!canWrite())return;
 const curPm=isAdmin()?(cashOf(s)>=upiOf(s)&&cashOf(s)>0?'cash':upiOf(s)>0?'upi':''):'';
-openDlg(`<h2>Edit ${esc(ticketStr(s.ticket))}</h2><p class="sub-line">Change any guest detail or the times. Changing the socks size, card, play area or birthday free play also updates the bill, even after the participant has finished. ${isAdmin()?'Use the Payment button for discounts and Paid / Pending.':''}</p>
+openDlg(`<h2>Edit ${esc(ticketStr(s.ticket))}</h2><p class="sub-line">Change any guest detail or the times. Changing the socks size, card, play area or birthday free play also updates the bill, even after the participant has finished. Use the Payment button for discounts and Paid / Pending.</p>
 <label class="field"><span>Customer name</span><input id="eeName" maxlength="60" value="${esc(s.name)}"></label>
 <div class="two"><label class="field"><span>Phone</span><input id="eePhone" type="tel" maxlength="20" value="${esc(phoneOf(s))}"></label>
 <label class="field"><span>Play area</span><select id="eeArea">${AREA_KEYS.map(a=>`<option value="${a}"${a===s.area?' selected':''}>${AREAS[a].label}</option>`).join('')}</select></label></div>
@@ -717,15 +720,18 @@ const adm=isAdmin(),b=adm?bl(s):{};
 const base=b.play||0,other=(b.socks||0)+(b.card||0),ext=b.extTotal||0;
 const P={disc:b.discType==='amt'?'custom':b.discType==='pct'?([5,10,15,20].indexOf(Number(b.discVal))>=0?String(Number(b.discVal)):'custom'):'none',
 dcType:b.discType==='amt'?'amt':'pct',dcVal:b.discVal||0,pay:pi.status!=='paid'?'pending':((b.upi||0)>(b.cash||0)?'upi':'cash'),touched:false};
+if(!adm)P.disc='keep';
 openDlg(`<h2>Payment: ${esc(s.name)}</h2><p class="sub-line">${esc(ticketStr(s.ticket))} \u00B7 ${s.players} player${s.players>1?'s':''} \u00B7 ${esc(AREAS[s.area].label)}</p>
 <div class="bill" id="pBill"></div>
-${adm?`<div class="lbl">Discount (play time only)</div>
-<div class="chips">${['none','5','10','15','20','custom'].map(v=>`<button type="button" class="chip" data-pd="${v}">${v==='none'?'No discount':v==='custom'?'Custom':v+'%'}</button>`).join('')}</div>
+<div class="lbl">Discount (play time only)${adm?'':' \u2014 leave on \u201CNo change\u201D to keep the current discount'}</div>
+<div class="chips">${(adm?['none','5','10','15','20','custom']:['keep','none','5','10','15','20','custom']).map(v=>`<button type="button" class="chip" data-pd="${v}">${v==='keep'?'No change':v==='none'?'No discount':v==='custom'?'Custom':v+'%'}</button>`).join('')}</div>
 <div class="two" id="pCustom" hidden><label class="field"><span>Custom discount</span><input id="pDcVal" type="number" min="0" step="1" value="${P.dcVal}"></label>
 <label class="field"><span>Type</span><select id="pDcType"><option value="pct"${P.dcType==='pct'?' selected':''}>Percent (%)</option><option value="amt"${P.dcType==='amt'?' selected':''}>Amount (${esc(settings.currency)})</option></select></label></div>
-<label class="field"><span>Adjustment (${esc(settings.currency)}, can be negative)</span><input id="pAdj" type="number" step="1" value="${b.adjust||0}"></label>`:''}
+${adm?`<label class="field"><span>Adjustment (${esc(settings.currency)}, can be negative)</span><input id="pAdj" type="number" step="1" value="${b.adjust||0}"></label>`:''}
 <div class="lbl" style="color:var(--yellow-ink)">Payment received</div>
-<div class="chips"><button type="button" class="chip" data-pp="pending">Pending</button><button type="button" class="chip" data-pp="cash">Paid by Cash</button><button type="button" class="chip" data-pp="upi">Paid by UPI</button></div>
+<div class="chips"><button type="button" class="chip" data-pp="pending">Pending</button><button type="button" class="chip" data-pp="cash">Paid by Cash</button><button type="button" class="chip" data-pp="upi">Paid by UPI</button><button type="button" class="chip" data-pp="part">Part payment</button></div>
+<div class="two" id="pPartWrap" hidden><label class="field"><span>Cash amount received now</span><input id="pPartCash" type="number" min="0" step="1" inputmode="decimal"></label>
+<label class="field"><span>UPI amount received now</span><input id="pPartUpi" type="number" min="0" step="1" inputmode="decimal"></label></div>
 ${pi.status==='partial'?`<p class="hint" style="margin:0 0 10px">Part of the bill was received earlier. Choose Paid by Cash or Paid by UPI when the rest has been received.</p>`:''}
 <div class="dlg-actions"><button class="btn ghost" id="pNo">Cancel</button><button class="btn primary" id="pOk">Save</button></div>`);
 const dcn=()=>P.disc==='none'?{t:'none',v:0}:P.disc==='custom'?{t:$('#pDcType').value==='amt'?'amt':'pct',v:num($('#pDcVal').value)}:{t:'pct',v:Number(P.disc)};
@@ -734,17 +740,21 @@ const calc=()=>{
 let bill=pi.bill,d=0,adj=0,total=0;
 if(adm){d=discAmt();adj=Number($('#pAdj').value)||0;total=base-d+other;bill=total+ext+adj}
 const already=adm?Math.min(bill,b.paidAmount||0):Math.min(pi.bill,pi.bill-pi.due);
-const after=!P.touched?Math.max(0,bill-already):P.pay!=='pending'?0:bill;
+const partNow=P.pay==='part'?num($('#pPartCash').value)+num($('#pPartUpi').value):0;
+const after=!P.touched?Math.max(0,bill-already):P.pay==='part'?Math.max(0,bill-already-partNow):P.pay!=='pending'?0:bill;
+$('#pPartWrap').hidden=P.pay!=='part';
 $$('#dlgBody [data-pp]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.pp===P.pay)));
-if(adm){
 $$('#dlgBody [data-pd]').forEach(c=>c.setAttribute('aria-pressed',String(c.dataset.pd===P.disc)));
 $('#pCustom').hidden=P.disc!=='custom';
+if(adm){
 $('#pBill').innerHTML=`<div class="r"><span>Play fees</span><b>${money(b.play||0)}</b></div><div class="r"><span>Socks</span><b>${money(b.socks||0)}</b></div>`+
 (b.card?`<div class="r"><span>Card (new customer)</span><b>${money(b.card)}</b></div>`:'')+(ext?`<div class="r"><span>Extra time</span><b>${money(ext)}</b></div>`:'')+
 (d?`<div class="r"><span>Discount on play time</span><b>\u2212${money(d)}</b></div>`:'')+(adj?`<div class="r"><span>Adjustment</span><b>${money(adj)}</b></div>`:'')+
-`<div class="r tot"><span>Bill amount</span><b>${money(bill)}</b></div><div class="r"><span>Amount due after saving</span><b>${money(after)}</b></div>`;
+(P.pay==='part'?`<div class="r"><span>Received now</span><b>${money(partNow)}</b></div>`:'')+`<div class="r tot"><span>Bill amount</span><b>${money(bill)}</b></div><div class="r"><span>Amount due after saving</span><b>${money(after)}</b></div>`;
 }else{
 $('#pBill').innerHTML=`<div class="r"><span>Bill amount</span><b>${money(pi.bill)}</b></div><div class="r"><span>Payment now</span><b>${STATUS_LABEL[pi.status]}</b></div>`+
+(P.disc!=='keep'?`<div class="r"><span>Discount</span><b>${P.disc==='none'?'Will be removed':'Will be applied'} when you save</b></div>`:'')+
+(P.pay==='part'?`<div class="r"><span>Received now</span><b>${money(partNow)}</b></div>`:'')+
 `<div class="r tot"><span>Amount to collect</span><b>${money(after)}</b></div>`;
 }
 return {d,adj,total,bill,already};
@@ -759,18 +769,27 @@ const pp=e.target.closest('[data-pp]');if(pp){P.pay=pp.dataset.pp;P.touched=true
 $('#pNo').onclick=closeDlg;
 $('#pOk').onclick=()=>{
 const r=calc();
+let pc=0,pu=0;
+if(P.touched&&P.pay==='part'){
+pc=num($('#pPartCash').value);pu=num($('#pPartUpi').value);
+if(pc+pu<=0){toast('Enter the cash or UPI amount received now.',true);return}
+if((adm||P.disc==='keep')&&pc+pu>(adm?Math.max(0,r.bill-r.already):pi.due)+0.001){toast('The amount is more than what is still due.',true);return}
+}
+const addPart=()=>B.addPayment(id,{cash:pc,upi:pu,by:me.name});
 if(adm){
 const d=dcn();let paidAmt,cash=b.cash||0,upi=b.upi||0,card=b.cardAmt||0;
-if(!P.touched){
+if(!P.touched||P.pay==='part'){
 paidAmt=r.already;let over=cash+upi+card-paidAmt;
 if(over>0){const t1=Math.min(cash,over);cash-=t1;over-=t1;const t2=Math.min(upi,over);upi-=t2;over-=t2;card=Math.max(0,card-over)}
 }else if(P.pay==='pending'){paidAmt=0;cash=0;upi=0;card=0}
 else{paidAmt=r.bill;cash=P.pay==='cash'?r.bill:0;upi=P.pay==='upi'?r.bill:0;card=0}
-B.setBilling(id,{startAt:s.startAt,discType:d.t,discVal:d.v,discount:r.d,total:r.total,adjust:r.adj,paidAmount:paidAmt,cash,upi,cardAmt:card,paidAt:Date.now(),paidBy:me.name}).catch(writeErr);
-}else if(P.touched){
-B.setPaid(id,P.pay!=='pending',me.name,P.pay==='upi'?'upi':'cash').catch(writeErr);
+B.setBilling(id,{startAt:s.startAt,discType:d.t,discVal:d.v,discount:r.d,total:r.total,adjust:r.adj,paidAmount:paidAmt,cash,upi,cardAmt:card,paidAt:Date.now(),paidBy:me.name}).then(()=>P.touched&&P.pay==='part'?addPart():null).catch(writeErr);
+}else{
+const doPay=()=>P.pay==='part'?addPart():B.setPaid(id,P.pay!=='pending',me.name,P.pay==='upi'?'upi':'cash');
+if(P.disc!=='keep'){const d=dcn();B.setDiscount(id,d).then(()=>P.touched?doPay():null).catch(writeErr)}
+else if(P.touched){doPay().catch(writeErr)}
 }
-closeDlg();toast(P.touched||adm?'Payment saved.':'No change.');
+closeDlg();toast(P.touched||adm||P.disc!=='keep'?'Saved.':'No change.');
 };
 }
 function nextTicket(offset){
@@ -779,14 +798,14 @@ return sessions.filter(s=>s.startAt>=f).reduce((m,s)=>Math.max(m,s.ticket||0),0)
 }
 function commitGuest(g,ticket,now){
 const id=uid(),adm=isAdmin();
-const dc=adm?{t:g.discType,v:g.discVal}:{t:'none',v:0};
+const dc={t:g.discType||'none',v:g.discVal||0};
 const b=calcBill(g,g.min,dc);
 const guest=norm({id,ticket,area:g.area,name:g.name,players:g.players,ctype:g.ctype,card:g.card,bday:g.card==='Premium'&&g.bday,
 socks:g.socks,remark:g.remark,baseMin:g.min,durationMin:g.min,startAt:now,extensions:[],status:'active',by:me.name});
 B.createGuest(guest).then(()=>{
 if(g.phone)B.saveContact(id,{phone:g.phone,startAt:now}).catch(()=>{});
 B.createBilling(id,{startAt:now,play:b.play,socks:b.sock,card:b.card,discount:b.discount,discType:dc.t,discVal:dc.v,total:b.total,
-paid:!!g.paid,payMethod:g.payMethod||'cash',paidBy:me.name}).catch(writeErr);
+paid:!!g.paid,payMethod:g.payMethod||'cash',cashAmt:g.cashAmt,upiAmt:g.upiAmt,paidBy:me.name}).catch(writeErr);
 }).catch(writeErr);
 return guest;
 }
@@ -811,12 +830,14 @@ $('#entryBody').innerHTML=`
 <div class="lbl" id="cardLbl">Card type</div>${chipRow('card',CARDS)}
 <div id="bdayWrap" hidden><div class="lbl">Birthday free play (one player plays free)</div>${chipRow('bday',['no','yes'],v=>v==='yes'?'Yes':'No')}</div>
 <div class="lbl">Socks size</div>${chipRow('socks',SOCKS)}
-<div class="adm"><div class="lbl">Discount</div>${chipRow('disc',['none',5,10,15,20,'custom'],v=>v==='none'?'No discount':v==='custom'?'Custom':v+'%')}
+<div><div class="lbl">Discount (on play time only)</div>${chipRow('disc',['none',5,10,15,20,'custom'],v=>v==='none'?'No discount':v==='custom'?'Custom':v+'%')}
 <div class="two" id="dcWrap" hidden><label class="field"><span>Custom discount</span><input id="dcVal" type="number" min="0" step="1" value="0" inputmode="decimal"></label>
 <label class="field"><span>Type</span><select id="dcType"><option value="pct">Percent (%)</option><option value="amt">Amount (${esc(settings.currency)})</option></select></label></div></div>
 <label class="field"><span>Remark (optional)</span><textarea id="eRem" maxlength="160" placeholder="Wristband number, party, allergies..."></textarea></label>
 <div class="bill" id="eBill"></div>
-<div class="lbl" style="color:var(--yellow-ink)">Payment received</div>${chipRow('pay',['pending','cash','upi'],v=>PAYCHIP[v])}
+<div class="lbl" style="color:var(--yellow-ink)">Payment received</div>${chipRow('pay',['pending','cash','upi','part'],v=>PAYCHIP[v])}
+<div class="two" id="partWrap" hidden><label class="field"><span>Cash amount received</span><input id="ePartCash" type="number" min="0" step="1" inputmode="decimal"></label>
+<label class="field"><span>UPI amount received</span><input id="ePartUpi" type="number" min="0" step="1" inputmode="decimal"></label></div>
 <div class="dlg-actions"><button class="btn ghost" data-close>Cancel</button><button class="btn primary big" id="eGo">Start timer</button></div>`;
 const nm=customers();
 $('#nameList').innerHTML=Object.keys(nm).slice(0,400).map(k=>`<option value="${esc(nm[k].name)}"></option>`).join('');
@@ -827,7 +848,7 @@ setTimeout(()=>{try{$('#eName').focus()}catch(e){}},50);
 }
 const entryMin=()=>entry.min==='custom'?(parseInt($('#eMin').value,10)||0):entry.min;
 function entryDisc(){
-if(!isAdmin()||entry.disc==='none')return {t:'none',v:0};
+if(entry.disc==='none')return {t:'none',v:0};
 if(entry.disc==='custom')return {t:$('#dcType').value==='amt'?'amt':'pct',v:num($('#dcVal').value)};
 return {t:'pct',v:Number(entry.disc)};
 }
@@ -839,6 +860,7 @@ b.setAttribute('aria-pressed',String(String(cur)===b.dataset.v));
 });
 $('#bdayWrap').hidden=entry.card!=='Premium';
 $('#eCustomWrap').hidden=entry.min!=='custom';
+$('#partWrap').hidden=entry.pay!=='part';
 $('#dcWrap').hidden=entry.disc!=='custom';
 $('#cardLbl').textContent=entry.ctype==='new'?'Card type (new card)':'Card type (their existing card)';
 const min=entryMin(),b=calcBill(entry,min,entryDisc()),m=money;
@@ -847,7 +869,12 @@ if(b.sock)rows.push(`<div class="r"><span>Socks (${esc(entry.socks)})</span><b>$
 if(b.discount)rows.push(`<div class="r"><span>Discount on play time</span><b>\u2212${m(b.discount)}</b></div>`);
 if(b.card)rows.push(`<div class="r"><span>${esc(entry.card)} card (new customer)</span><b>${m(b.card)}</b></div>`);
 rows.push(`<div class="r tot"><span>Bill amount</span><b>${m(b.total)}</b></div>`);
-rows.push(`<div class="r"><span>Amount due after payment</span><b>${entry.pay!=='pending'?m(0):m(b.total)}</b></div>`);
+if(entry.pay==='part'){
+const pc=num($('#ePartCash').value),pu=num($('#ePartUpi').value),rec=pc+pu;
+rows.push(`<div class="r"><span>Cash received</span><b>${m(pc)}</b></div><div class="r"><span>UPI received</span><b>${m(pu)}</b></div><div class="r"><span>Total received</span><b>${m(rec)}</b></div>`);
+rows.push(`<div class="r"><span>Amount due after payment</span><b>${m(Math.max(0,b.total-rec))}</b></div>`);
+if(rec>b.total)rows.push(`<div class="r"><span style="color:var(--over)">Received is more than the bill</span><b></b></div>`);
+}else rows.push(`<div class="r"><span>Amount due after payment</span><b>${entry.pay!=='pending'?m(0):m(b.total)}</b></div>`);
 $('#eBill').innerHTML=rows.join('');
 }
 edlg.addEventListener('close',()=>{clearInterval(entryClock)});
@@ -897,9 +924,15 @@ startAt=new Date($('#eStart').value).getTime();
 if(!startAt){toast('Enter a valid check-in time.',true);return}
 if(Math.abs(startAt-Date.now())>24*3600000){toast('The check-in time must be within 24 hours of now. Check the date.',true);return}
 }
+const part=entry.pay==='part';let pc=0,pu=0;
+if(part){
+pc=num($('#ePartCash').value);pu=num($('#ePartUpi').value);
+if(pc+pu<=0){toast('Enter the cash or UPI amount received, or choose Pending.',true);return}
+if(pc+pu>calcBill(entry,min,dc).total){toast('The amount received is more than the bill.',true);return}
+}
 const g=commitGuest({area:entry.area,name,phone:$('#ePhone').value.trim(),players:entry.players,ctype:entry.ctype,card:entry.card,bday:entry.bday,
 socks:entry.socks,remark:$('#eRem').value.trim(),min,discType:dc.t,discVal:dc.v,
-paid:entry.pay!=='pending',payMethod:entry.pay},nextTicket(0),startAt);
+paid:entry.pay==='cash'||entry.pay==='upi',payMethod:entry.pay==='upi'?'upi':'cash',cashAmt:part?pc:undefined,upiAmt:part?pu:undefined},nextTicket(0),startAt);
 edlg.close();
 toast(`${name} checked in: ${AREAS[g.area].label}, ${fmtMin(min)}.`+(startAt>Date.now()+60000?' Starts at '+clockStr(startAt)+'.':''));
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
@@ -910,7 +943,7 @@ bday:'no',socks:prev?prev.socks:'No socks',remark:'',disc:'none',dcVal:0,dcType:
 let bulkPay='pending';
 function rowCalc(r){
 const min=r.min==='custom'?(parseInt(r.custom,10)||0):Number(r.min);
-const dc=!isAdmin()||r.disc==='none'?{t:'none',v:0}:r.disc==='custom'?{t:r.dcType==='amt'?'amt':'pct',v:num(r.dcVal)}:{t:'pct',v:Number(r.disc)};
+const dc=r.disc==='none'?{t:'none',v:0}:r.disc==='custom'?{t:r.dcType==='amt'?'amt':'pct',v:num(r.dcVal)}:{t:'pct',v:Number(r.disc)};
 const b=calcBill({area:r.area,card:r.card,ctype:r.ctype,socks:r.socks,bday:r.card==='Premium'&&r.bday==='yes',players:1},min,dc);
 return {min,dc,b};
 }
@@ -932,8 +965,8 @@ return `<div class="brow" data-i="${i}">
 <label class="field" style="grid-column:1/-1"><span>Remark</span><input data-f="remark" maxlength="160" value="${esc(r.remark)}"></label>
 </div>
 <div class="bpay"><div class="bgrid">
-<label class="field adm"><span>Discount (play time only)</span>${sel('disc',['none','5','10','15','20','custom'],v=>v==='none'?'None':v==='custom'?'Custom':v+'%')}</label>
-<div class="field adm" data-dw${r.disc==='custom'?'':' hidden'}><span>Custom discount</span><div class="two" style="gap:6px"><input data-f="dcVal" type="number" min="0" step="1" value="${esc(r.dcVal)}">${sel('dcType',['pct','amt'],v=>v==='pct'?'%':'\u20B9')}</div></div>
+<label class="field"><span>Discount (play time only)</span>${sel('disc',['none','5','10','15','20','custom'],v=>v==='none'?'None':v==='custom'?'Custom':v+'%')}</label>
+<div class="field" data-dw${r.disc==='custom'?'':' hidden'}><span>Custom discount</span><div class="two" style="gap:6px"><input data-f="dcVal" type="number" min="0" step="1" value="${esc(r.dcVal)}">${sel('dcType',['pct','amt'],v=>v==='pct'?'%':'\u20B9')}</div></div>
 <div class="field"><span>Bill amount</span><div class="bval" data-due>-</div></div>
 </div></div></div>`;
 }
@@ -953,9 +986,17 @@ function syncBulkPay(){$$('#bulkBody [data-bpay]').forEach(c=>c.setAttribute('ar
 function updateBulkTotals(){
 const rows=bulk.filter(r=>r.name.trim()),cs=rows.map(rowCalc),total=sum(cs,c=>c.b.total);
 syncBulkPay();
+$('#bPartWrap').hidden=bulkPay!=='part';
+let tail;
+if(bulkPay==='part'){
+const pc=num($('#bpCash').value),pu=num($('#bpUpi').value),rec=pc+pu;
+tail=`<div class="r"><span>Cash received</span><b>${money(pc)}</b></div><div class="r"><span>UPI received</span><b>${money(pu)}</b></div><div class="r"><span>Total received</span><b>${money(rec)}</b></div>`+
+`<div class="r tot"><span>Amount due after payment</span><b>${money(Math.max(0,total-rec))}</b></div>`+
+(rec>total?`<div class="r"><span style="color:var(--over)">Received is more than the total bill</span><b></b></div>`:'')+
+`<div class="r"><span>How it is shared</span><b>Filled participant by participant, cash first</b></div>`;
+}else tail=`<div class="r tot"><span>Amount due after payment</span><b>${bulkPay!=='pending'?money(0):money(total)}</b></div>`;
 $('#bulkTot').innerHTML=`<div class="r"><span>Participants</span><b>${rows.length}</b></div>`+
-`<div class="r"><span>Total bill amount</span><b>${money(total)}</b></div>`+
-`<div class="r tot"><span>Amount due after payment</span><b>${bulkPay!=='pending'?money(0):money(total)}</b></div>`;
+`<div class="r"><span>Total bill amount</span><b>${money(total)}</b></div>`+tail;
 }
 function openBulk(){
 if(!canWrite())return;
@@ -968,7 +1009,9 @@ $('#bulkBody').innerHTML=`<div class="dlg-head"><h2>Bulk entry</h2><button class
 <div id="bulkRows"></div>
 <div class="acts" style="margin:6px 0 14px"><button class="btn ghost" data-badd="1">+ Add row</button><button class="btn ghost" data-badd="5">+ Add 5 rows</button><button class="btn ghost" data-bcopy="1">Copy last row</button></div>
 <div class="lbl" style="color:var(--yellow-ink)">Payment received for the whole group (one choice for everyone)</div>
-<div class="chips"><button type="button" class="chip" data-bpay="pending">Pending</button><button type="button" class="chip" data-bpay="cash">Paid by Cash</button><button type="button" class="chip" data-bpay="upi">Paid by UPI</button></div>
+<div class="chips"><button type="button" class="chip" data-bpay="pending">Pending</button><button type="button" class="chip" data-bpay="cash">Paid by Cash</button><button type="button" class="chip" data-bpay="upi">Paid by UPI</button><button type="button" class="chip" data-bpay="part">Part payment</button></div>
+<div class="two" id="bPartWrap" hidden><label class="field"><span>Cash amount received (whole group)</span><input id="bpCash" type="number" min="0" step="1" inputmode="decimal"></label>
+<label class="field"><span>UPI amount received (whole group)</span><input id="bpUpi" type="number" min="0" step="1" inputmode="decimal"></label></div>
 <div class="bill" id="bulkTot"></div>
 <div class="dlg-actions"><button class="btn ghost" data-bclose>Cancel</button><button class="btn primary big" id="bulkGo">Start all timers</button></div>`;
 bdlg.showModal();renderBulk();
@@ -991,6 +1034,7 @@ if(e.target.id==='bulkGo')submitBulk();
 });
 bdlg.addEventListener('input',e=>{
 if(e.target.id==='bStart'){bulkStartTouched=true;return}
+if(e.target.id==='bpCash'||e.target.id==='bpUpi'){updateBulkTotals();return}
 const row=e.target.closest('.brow'),f=e.target.dataset&&e.target.dataset.f;if(!row||!f)return;
 const i=Number(row.dataset.i);bulk[i][f]=e.target.value;
 updateRow(i);updateBulkTotals();
@@ -1009,10 +1053,19 @@ if(!t){toast('Participant '+(x.i+1)+': enter a valid check-in time.',true);retur
 if(Math.abs(t-now)>24*3600000){toast('Participant '+(x.i+1)+': the check-in time must be within 24 hours of now.',true);return}
 starts.push(t);
 }
+const totals=rows.map(x=>rowCalc(x.r).b.total),allTotal=sum(totals.map(t=>({t})),o=>o.t);
+let alloc=null;
+if(bulkPay==='part'){
+let C=num($('#bpCash').value),U=num($('#bpUpi').value);
+if(C+U<=0){toast('Enter the cash or UPI amount received, or choose Pending.',true);return}
+if(C+U>allTotal+0.001){toast('The amount received is more than the total bill.',true);return}
+alloc=totals.map(t=>{const c=r2(Math.min(t,C));C=r2(C-c);const u=r2(Math.min(t-c,U));U=r2(U-u);return {c,u}});
+}
 rows.forEach((x,n)=>{
 const c=rowCalc(x.r),r=x.r;
 commitGuest({area:r.area,name:r.name.trim(),phone:r.phone.trim(),players:1,ctype:r.ctype,card:r.card,bday:r.bday==='yes',
-socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,paid:bulkPay!=='pending',payMethod:bulkPay},t0+n,starts[n]);
+socks:r.socks,remark:r.remark.trim(),min:c.min,discType:c.dc.t,discVal:c.dc.v,paid:bulkPay==='cash'||bulkPay==='upi',payMethod:bulkPay==='upi'?'upi':'cash',
+cashAmt:alloc?alloc[n].c:undefined,upiAmt:alloc?alloc[n].u:undefined},t0+n,starts[n]);
 });
 bdlg.close();toast(rows.length+' participant'+(rows.length>1?'s':'')+' checked in.');
 if(tab!=='dash'&&tab!=='over')switchTab('dash');
