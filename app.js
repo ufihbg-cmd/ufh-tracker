@@ -29,7 +29,7 @@ softplay:{same:false,Basic:{30:100,60:180,120:320},Premium:{30:80,60:150,120:280
 let B=null;                       // backend
 let me=null;                      // {email,name,role} or null = public viewer
 let appReady=false;
-let sPub=null,sPrice=null;
+let sPub=null,priceRows=[],lastPriceKey='';
 let settings=mergeSettings(null);
 let sessions=[],billing={},contacts={},staffList=[],pstat={};
 let recovering=false;
@@ -100,23 +100,33 @@ const c=e&&e.code||'';
 toast(c==='permission-denied'?'You do not have permission to do that.':'Could not save'+(c?' ('+c+')':'')+'. Check the connection.',true);
 }
 const isOwnerEmail=e=>e===String(CONFIG.ownerEmail||'').toLowerCase()||(typeof demoOwner==='string'&&e===demoOwner);
-function playFee(area,card,min){
-const p=settings.play[area],t=(p.same||card==='Basic')?p.Basic:p.Premium;
+function pricingVersions(){
+const v=priceRows.filter(r=>/^v_/.test(r.id)&&r.data&&typeof r.data.effectiveFrom==='number').map(r=>Object.assign({_id:r.id},r.data)).sort((a,b)=>a.effectiveFrom-b.effectiveFrom);
+if(v.length)return v;
+const m=priceRows.find(r=>r.id==='main');
+return m&&m.data?[Object.assign({_id:'main',effectiveFrom:0},m.data)]:[];
+}
+function pricingRawAt(ts){const vs=pricingVersions();let pick=vs[0]||null;vs.forEach(x=>{if(x.effectiveFrom<=ts)pick=x});return pick}
+const pricesAt=ts=>mergeSettings(pricingRawAt(ts));
+const currentPriceKey=()=>{const x=pricingRawAt(Date.now());return x?x._id+':'+x.effectiveFrom:''};
+function playFee(area,card,min,P){
+const p=(P||settings).play[area],t=(p.same||card==='Basic')?p.Basic:p.Premium;
 if(t[min]!=null)return t[min];
 return Math.round((t[60]||0)/60*min/5)*5;
 }
-function calcBill(e,min,dc){
-const n=e.players,fee=playFee(e.area,e.card,min);
+function calcBill(e,min,dc,P){
+P=P||settings;
+const n=e.players,fee=playFee(e.area,e.card,min,P);
 const freeN=(e.card==='Premium'&&e.bday)?1:0;
 const play=fee*Math.max(0,n-freeN);
-const sockUnit=e.socks!=='No socks'?(settings.sockPrices[e.socks]||0):0,sock=sockUnit*n;
-const cardFee=e.ctype==='new'?(settings.cardPrices[e.card]||0):0;
+const sockUnit=e.socks!=='No socks'?(P.sockPrices[e.socks]||0):0,sock=sockUnit*n;
+const cardFee=e.ctype==='new'?(P.cardPrices[e.card]||0):0;
 let disc=0;   // discounts apply to play time only (never to socks or the card price)
 if(dc.t==='pct')disc=Math.round(play*Math.min(100,Math.max(0,dc.v))/100);
 else if(dc.t==='amt')disc=Math.min(play,Math.max(0,Math.round(dc.v)));
 return {n,fee,freeN,play,sockUnit,sock,card:cardFee,discount:disc,total:play-disc+sock+cardFee};
 }
-const extPrice=(s,min)=>Math.round((playFee(s.area,s.card,60)||0)/60*min/5)*5*(s.players||1);
+const extPrice=(s,min)=>Math.round((playFee(s.area,s.card,60,pricesAt(s.startAt))||0)/60*min/5)*5*(s.players||1);
 async function makeSupabaseBackend(cfg,hooks,modOverride){
 const mod=modOverride||await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
 const client=mod.createClient(cfg.url,cfg.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
@@ -224,7 +234,8 @@ if(r.data&&r.data.user&&Array.isArray(r.data.user.identities)&&r.data.user.ident
 return {needsConfirm:!(r.data&&r.data.session)};
 },
 subSettings:(cb,err)=>liveOne('app_settings',cb,err),
-subPricing:(cb,err)=>liveOne('app_pricing',cb,err),
+subPricing:(cb,err)=>live('app_pricing','id',()=>fetchAll(()=>client.from('app_pricing').select('id,data').order('id')),r=>[r.id,r.data],st=>cb(Array.from(st.entries()).map(e=>({id:e[0],data:e[1]}))),err),
+savePricingVersion:async(o,opt)=>{await ok(client.from('app_pricing').upsert((opt&&opt.skipMain)?[{id:'v_'+o.effectiveFrom,data:o}]:[{id:'v_'+o.effectiveFrom,data:o},{id:'main',data:o}],{onConflict:'id'}))},
 subStaff:(cb,err)=>live('staff','email',()=>fetchAll(()=>client.from('staff').select('*').order('email')),r=>[r.email,fromStaff(r)],st=>cb(Array.from(st.values())),err),
 subGuests:(since,cb,err)=>live('guests','id',()=>fetchAll(()=>client.from('guests').select('*').gte('start_at',since||0).order('start_at',{ascending:false}).order('id')),
 r=>[r.id,fromRowG(r)],st=>cb(Array.from(st.values())),err),
@@ -382,7 +393,7 @@ function stopSubs(){
 unsubs.forEach(f=>{try{f()}catch(e){}});unsubs=[];
 [unsubG,unsubB,unsubC,unsubP].forEach(f=>{if(f){try{f()}catch(e){}}});unsubG=unsubB=unsubC=unsubP=null;
 }
-function rebuildSettings(){settings=mergeSettings(Object.assign({},sPub||{},sPrice||{}));applySettings();if(tab!=='settings')renderAll()}
+function rebuildSettings(){settings=mergeSettings(Object.assign({},pricingRawAt(Date.now())||{},sPub||{}));lastPriceKey=currentPriceKey();applySettings();if(tab==='settings')renderPriceHistory();else renderAll()}
 function startGuestSubs(){
 [unsubG,unsubB,unsubC,unsubP].forEach(f=>{if(f){try{f()}catch(e){}}});unsubG=unsubB=unsubC=unsubP=null;
 unsubG=B.subGuests(sinceMs(),list=>{sessions=list.map(norm);loaded=true;setBanner('perm','');renderAll()},subErr);
@@ -392,7 +403,7 @@ if(me&&!isAdmin())unsubP=B.subPayStatus(sinceMs(),m=>{pstat=m;renderAll()},subEr
 }
 function startSubs(){
 unsubs.push(B.subSettings(s=>{sPub=s;rebuildSettings()},subErr));
-if(me)unsubs.push(B.subPricing(p=>{sPrice=p;rebuildSettings()},subErr));
+if(me)unsubs.push(B.subPricing(rows=>{priceRows=rows;rebuildSettings()},subErr));
 if(isAdmin())unsubs.push(B.subStaff(l=>{staffList=l;if(tab==='team')renderTeam()},subErr));
 startGuestSubs();
 }
@@ -596,6 +607,7 @@ const LABEL={ok:'Playing',soon:'Ending soon',over:'Time\u2019s up'};
 function tick(){
 if(!appReady)return;
 const now=Date.now();
+if(currentPriceKey()!==lastPriceKey)rebuildSettings();
 $('#clock').textContent=new Date(now).toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
 const sig=overdueList(now).map(s=>s.id+':'+endOf(s)).join('|');
 if(sig!==lastOverSig){lastOverSig=sig;renderAll();return}
@@ -697,7 +709,7 @@ B.patchGuest(id,f).catch(writeErr);
 B.saveContact(id,{phone:$('#eePhone').value.trim(),startAt:sIn}).catch(()=>{});
 const changed=f.area!==s.area||f.card!==s.card||f.ctype!==s.ctype||f.socks!==s.socks||f.bday!==s.bday;
 if(changed){
-const nb=calcBill({area:f.area,card:f.card,ctype:f.ctype,socks:f.socks,bday:f.bday,players:s.players},s.baseMin||s.durationMin,{t:'none',v:0});
+const nb=calcBill({area:f.area,card:f.card,ctype:f.ctype,socks:f.socks,bday:f.bday,players:s.players},s.baseMin||s.durationMin,{t:'none',v:0},pricesAt(s.startAt));
 B.updateItems(id,{play:nb.play,socks:nb.sock,card:nb.card}).catch(writeErr);
 }
 const pm=$('#eePm').value;
@@ -799,7 +811,7 @@ return sessions.filter(s=>s.startAt>=f).reduce((m,s)=>Math.max(m,s.ticket||0),0)
 function commitGuest(g,ticket,now){
 const id=uid(),adm=isAdmin();
 const dc={t:g.discType||'none',v:g.discVal||0};
-const b=calcBill(g,g.min,dc);
+const b=calcBill(g,g.min,dc,pricesAt(now));
 const guest=norm({id,ticket,area:g.area,name:g.name,players:g.players,ctype:g.ctype,card:g.card,bday:g.card==='Premium'&&g.bday,
 socks:g.socks,remark:g.remark,baseMin:g.min,durationMin:g.min,startAt:now,extensions:[],status:'active',by:me.name});
 B.createGuest(guest).then(()=>{
@@ -846,6 +858,7 @@ $('#eStart').value=toLocalInput(Date.now());
 clearInterval(entryClock);entryClock=setInterval(()=>{if(entry&&!entry.startTouched&&edlg.open&&$('#eStart'))$('#eStart').value=toLocalInput(Date.now())},15000);
 setTimeout(()=>{try{$('#eName').focus()}catch(e){}},50);
 }
+const entryPr=()=>pricesAt(entry&&entry.startTouched?(new Date($('#eStart').value).getTime()||Date.now()):Date.now());
 const entryMin=()=>entry.min==='custom'?(parseInt($('#eMin').value,10)||0):entry.min;
 function entryDisc(){
 if(entry.disc==='none')return {t:'none',v:0};
@@ -863,7 +876,7 @@ $('#eCustomWrap').hidden=entry.min!=='custom';
 $('#partWrap').hidden=entry.pay!=='part';
 $('#dcWrap').hidden=entry.disc!=='custom';
 $('#cardLbl').textContent=entry.ctype==='new'?'Card type (new card)':'Card type (their existing card)';
-const min=entryMin(),b=calcBill(entry,min,entryDisc()),m=money;
+const min=entryMin(),b=calcBill(entry,min,entryDisc(),entryPr()),m=money;
 const rows=[`<div class="r"><span>${esc(AREAS[entry.area].label)} \u00B7 ${esc(min?fmtMin(min):'-')}</span><b>${b.freeN?'Free (birthday)':m(b.fee)}</b></div>`];
 if(b.sock)rows.push(`<div class="r"><span>Socks (${esc(entry.socks)})</span><b>${m(b.sockUnit)}</b></div>`);
 if(b.discount)rows.push(`<div class="r"><span>Discount on play time</span><b>\u2212${m(b.discount)}</b></div>`);
@@ -928,7 +941,7 @@ const part=entry.pay==='part';let pc=0,pu=0;
 if(part){
 pc=num($('#ePartCash').value);pu=num($('#ePartUpi').value);
 if(pc+pu<=0){toast('Enter the cash or UPI amount received, or choose Pending.',true);return}
-if(pc+pu>calcBill(entry,min,dc).total){toast('The amount received is more than the bill.',true);return}
+if(pc+pu>calcBill(entry,min,dc,entryPr()).total){toast('The amount received is more than the bill.',true);return}
 }
 const g=commitGuest({area:entry.area,name,phone:$('#ePhone').value.trim(),players:entry.players,ctype:entry.ctype,card:entry.card,bday:entry.bday,
 socks:entry.socks,remark:$('#eRem').value.trim(),min,discType:dc.t,discVal:dc.v,
@@ -944,7 +957,7 @@ let bulkPay='pending';
 function rowCalc(r){
 const min=r.min==='custom'?(parseInt(r.custom,10)||0):Number(r.min);
 const dc=r.disc==='none'?{t:'none',v:0}:r.disc==='custom'?{t:r.dcType==='amt'?'amt':'pct',v:num(r.dcVal)}:{t:'pct',v:Number(r.disc)};
-const b=calcBill({area:r.area,card:r.card,ctype:r.ctype,socks:r.socks,bday:r.card==='Premium'&&r.bday==='yes',players:1},min,dc);
+const b=calcBill({area:r.area,card:r.card,ctype:r.ctype,socks:r.socks,bday:r.card==='Premium'&&r.bday==='yes',players:1},min,dc,pricesAt(r.start?(new Date(r.start).getTime()||Date.now()):(bulkStartTouched?(new Date($('#bStart').value).getTime()||Date.now()):Date.now())));
 return {min,dc,b};
 }
 function rowHTML(r,i){
@@ -1260,6 +1273,8 @@ $('#sName').value=settings.name;$('#sCur').value=settings.currency;
 $('#sockS').value=settings.sockPrices.S;$('#sockM').value=settings.sockPrices.M;$('#sockL').value=settings.sockPrices.L;
 $('#cardBasic').value=settings.cardPrices.Basic;$('#cardPremium').value=settings.cardPrices.Premium;
 $('#sRemind').value=settings.remindEvery;$('#sWarn').value=settings.warnMin;
+$('#sEffective').value=toLocalInput(Date.now());
+renderPriceHistory();
 $('#priceTables').innerHTML=AREA_KEYS.map(a=>{
 const p=settings.play[a];
 const row=c=>`<tr data-row="${a}:${c}"${c==='Premium'&&p.same?' hidden':''}><td><b>${c}</b></td>${DURS.map(d=>`<td><input type="number" min="0" step="1" data-a="${a}" data-c="${c}" data-m="${d.min}" value="${p[c][d.min]}"></td>`).join('')}</tr>`;
@@ -1267,6 +1282,15 @@ return `<div class="field"><span class="lbl" style="color:var(--ink);font-family
 <label class="check"><input type="checkbox" data-same="${a}"${p.same?' checked':''}><span>Same price for Basic and Premium card</span></label>
 <div class="scroll"><table class="prices"><thead><tr><th>Card</th>${DURS.map(d=>`<th>${d.label}</th>`).join('')}</tr></thead><tbody>${row('Basic')}${row('Premium')}</tbody></table></div></div>`;
 }).join('');
+}
+function renderPriceHistory(){
+const el=$('#priceHistory');if(!el)return;
+const vs=pricingVersions().slice().reverse(),now=Date.now(),cur=pricingRawAt(now);
+el.innerHTML=vs.length?vs.map(v=>{
+const m=mergeSettings(v),tag=cur&&v._id===cur._id?'Current':v.effectiveFrom>now?'Scheduled':'Earlier';
+const when=v.effectiveFrom===0?'Original prices':new Date(v.effectiveFrom).toLocaleString([], {day:'numeric',month:'short',year:'numeric',hour:'numeric',minute:'2-digit'});
+return `<div class="line" style="grid-template-columns:170px 1fr auto"><span>${esc(when)}</span><span style="font-size:13px;color:var(--muted)">Trampoline 1 hour ${esc(money(m.play.trampoline.Basic[60]))} \u00B7 Soft play 1 hour ${esc(money(m.play.softplay.Basic[60]))} \u00B7 Socks M ${esc(money(m.sockPrices.M))} \u00B7 Basic card ${esc(money(m.cardPrices.Basic))} \u00B7 Premium card ${esc(money(m.cardPrices.Premium))}</span><b>${tag}${v.by?' \u00B7 '+esc(v.by):''}</b></div>`;
+}).join(''):'<p class="hint" style="margin:0">No price changes saved yet. The numbers in the table above are the starting examples.</p>';
 }
 $('#priceTables').addEventListener('change',e=>{
 const a=e.target.dataset&&e.target.dataset.same;if(!a)return;
@@ -1285,9 +1309,20 @@ const same=$(`[data-same="${a}"]`).checked;n.play[a].same=same;
 $$(`#priceTables input[data-a="${a}"]`).forEach(i=>{n.play[a][i.dataset.c][i.dataset.m]=num(i.value)});
 if(same)DURS.forEach(d=>{n.play[a].Premium[d.min]=n.play[a].Basic[d.min]});
 });
-settings=n;applySettings();renderSettings();renderAll();
-Promise.all([B.saveSettings({name:n.name,currency:n.currency,remindEvery:n.remindEvery,warnMin:n.warnMin}),B.savePricing({sockPrices:n.sockPrices,cardPrices:n.cardPrices,play:n.play})])
-.then(()=>toast('Settings saved.')).catch(writeErr);
+const pr={sockPrices:n.sockPrices,cardPrices:n.cardPrices,play:n.play};
+const changed=JSON.stringify(pr)!==JSON.stringify({sockPrices:settings.sockPrices,cardPrices:settings.cardPrices,play:settings.play});
+let eff=$('#sEffective').value?new Date($('#sEffective').value).getTime():Date.now();
+if(!eff)eff=Date.now();
+const now=Date.now(),pub={name:n.name,currency:n.currency,remindEvery:n.remindEvery,warnMin:n.warnMin};
+if(!changed||eff<=now+1500)settings=n;else settings=Object.assign({},settings,pub);
+applySettings();renderSettings();renderAll();
+const jobs=[B.saveSettings(pub)];
+if(changed){
+const first=!pricingVersions().length;   // the very first change: keep the previous prices as the "original" version for everything made before
+const orig=first?B.savePricingVersion({effectiveFrom:0,by:'original prices',sockPrices:settings.sockPrices,cardPrices:settings.cardPrices,play:settings.play},{skipMain:true}):Promise.resolve();
+jobs.push(orig.then(()=>B.savePricingVersion(Object.assign({effectiveFrom:Math.max(eff,now),by:me.name,savedAt:now},pr))));
+}
+Promise.all(jobs).then(()=>toast(!changed?'Settings saved.':eff>now+60000?'Saved. The new prices start on '+new Date(eff).toLocaleString([], {day:'numeric',month:'short',hour:'numeric',minute:'2-digit'})+'. Entries already saved keep their old prices.':'Saved. The new prices apply from now. Entries already saved keep their old prices.')).catch(writeErr);
 });
 $('#testBeep').addEventListener('click',()=>{if(!soundOn)toast('Sound is switched off at the top of the page.',true);beep()});
 function applySettings(){$('#bizName').textContent=settings.name;document.title=settings.name+' \u00B7 Guest Tracker'}

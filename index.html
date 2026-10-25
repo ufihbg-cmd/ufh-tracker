@@ -358,6 +358,8 @@ dialog.xwide{width:min(1000px,calc(100% - 24px))}
 <label class="field"><span>Currency symbol</span><input id="sCur" maxlength="4"></label>
 </div>
 <div id="priceTables"></div>
+<label class="field" style="max-width:340px"><span>New prices apply from</span><input id="sEffective" type="datetime-local"></label>
+<p class="hint" style="margin:-6px 0 14px">Entries that are already saved keep the prices they were made with. Only check-ins from this time onward use new prices. Leave it on now to start straight away, or pick a later time (for example the 1st of next month). Prices only change when you edit the numbers above.</p>
 <div class="field"><span class="lbl" style="color:var(--ink);font-family:var(--display);font-size:18px">Socks price (per pair, per player)</span>
 <div class="set-grid" style="grid-template-columns:repeat(3,1fr)">
 <label class="field"><span>Size S</span><input id="sockS" type="number" min="0" step="1"></label>
@@ -380,6 +382,7 @@ dialog.xwide{width:min(1000px,calc(100% - 24px))}
 </div>
 </fieldset>
 </div>
+<div class="panel" style="max-width:860px;margin-top:16px"><h2>Price history</h2><div class="lines" id="priceHistory"></div></div>
 </section>
 </div>
 <dialog id="entryDlg" class="wide"><div id="entryBody"></div></dialog>
