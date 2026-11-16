@@ -22,7 +22,7 @@ const REASONS=['Customer left early','Entered by mistake','Payment issue','Dupli
 const ADMIN_TABS=['customers','stats','team','settings'];
 const REC_TABS={completed:'completed',cancelled:'cancelled',history:null};
 const TITLES={completed:'Completed customers',cancelled:'Cancelled customers',history:'History: all check-ins'};
-const DEFAULTS={name:'Unlimited Fun Is Here',currency:'\u20B9',remindEvery:2,warnMin:5,
+const DEFAULTS={name:'Unlimited Fun Is Here',currency:'\u20B9',remindEvery:2,warnMin:5,bizAddress:'Kovvada, Annavaram, Bhimavaram',bizPhone:'',bizGst:'',waText:'Hello {name}, your play time at UFH ends in {mins} minutes. Thank you for visiting Unlimited Fun Is Here!',
 sockPrices:{S:30,M:30,L:30},cardPrices:{Basic:200,Premium:500},
 play:{trampoline:{same:true,Basic:{30:150,60:250,120:450},Premium:{30:150,60:250,120:450}},
 softplay:{same:false,Basic:{30:100,60:180,120:320},Premium:{30:80,60:150,120:280}}}};
@@ -45,7 +45,8 @@ const isAdmin=()=>!!me&&me.role==='admin';
 const isStaffUp=()=>!!me;
 function mergeSettings(d){
 const s=JSON.parse(JSON.stringify(DEFAULTS));if(!d)return s;
-['name','currency'].forEach(k=>{if(typeof d[k]==='string'&&d[k])s[k]=d[k]});
+['name','currency','bizAddress','waText'].forEach(k=>{if(typeof d[k]==='string'&&d[k])s[k]=d[k]});
+['bizPhone','bizGst'].forEach(k=>{if(typeof d[k]==='string')s[k]=d[k]});
 ['remindEvery','warnMin'].forEach(k=>{if(typeof d[k]==='number')s[k]=d[k]});
 SOCK_SIZES.forEach(k=>{if(d.sockPrices&&typeof d.sockPrices[k]==='number')s.sockPrices[k]=d.sockPrices[k]});
 CARDS.forEach(k=>{if(d.cardPrices&&typeof d.cardPrices[k]==='number')s.cardPrices[k]=d.cardPrices[k]});
@@ -58,11 +59,11 @@ return s;
 }
 function norm(s){
 s.players=s.players||1;s.socks=s.socks||'No socks';s.card=s.card||'Basic';s.ctype=s.ctype||'existing';
-s.bday=!!s.bday;s.extensions=s.extensions||[];
+s.bday=!!s.bday;s.extensions=s.extensions||[];s.pausedMs=s.pausedMs||0;s.pausedAt=s.pausedAt||null;
 s.area=AREAS[s.area]?s.area:'trampoline';s.name=s.name||'Guest';return s;
 }
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-const endOf=s=>s.startAt+s.durationMin*60000;
+const endOf=s=>s.startAt+s.durationMin*60000+(s.pausedMs||0)+(s.pausedAt?Math.max(0,Date.now()-s.pausedAt):0);
 const money=n=>settings.currency+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:2});
 const clockStr=ms=>new Date(ms).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
 const dateStr=ms=>new Date(ms).toLocaleDateString([], {day:'numeric',month:'short'});
@@ -100,6 +101,37 @@ const c=e&&e.code||'';
 toast(c==='permission-denied'?'You do not have permission to do that.':'Could not save'+(c?' ('+c+')':'')+'. Check the connection.',true);
 }
 const isOwnerEmail=e=>e===String(CONFIG.ownerEmail||'').toLowerCase()||(typeof demoOwner==='string'&&e===demoOwner);
+const DAYN=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const getOffers=()=>{const r=priceRows.find(x=>x.id==='offers');return r&&r.data&&Array.isArray(r.data.offers)?r.data.offers:[]};
+const activeOffers=()=>getOffers().filter(o=>o&&o.active!==false);
+const getDrafts=()=>{const r=priceRows.find(x=>x.id==='drafts');return r&&r.data&&Array.isArray(r.data.drafts)?r.data.drafts:[]};
+const t12=hm=>{const a=String(hm||'0:0').split(':').map(Number),h=a[0]||0,m=a[1]||0;return ((h%12)||12)+(m?':'+String(m).padStart(2,'0'):'')+' '+(h>=12?'PM':'AM')};
+function offerText(o){
+const d=(o.days||[]).slice().sort((a,b)=>a-b);
+let days='every day';
+if(d.length&&d.length<7)days=d.join()==='1,2,3,4,5'?'Mon\u2013Fri':d.map(x=>DAYN[x]).join(', ');
+const durs=(o.durations||[]).length?o.durations.map(fmtMin).join(' and '):'any time length';
+const ar=(o.areas||[]).length&&o.areas.length<AREA_KEYS.length?o.areas.map(a=>AREAS[a].label).join(' and '):'both play areas';
+return days+', '+t12(o.from)+' to '+t12(o.to)+', '+durs+', '+ar;
+}
+function offerOk(o,ts,area,min){
+if(!o||o.active===false)return {ok:false,why:'this offer is switched off.'};
+const dt=new Date(ts),hm=dt.getHours()*60+dt.getMinutes();
+const f=String(o.from||'00:00').split(':').map(Number),t=String(o.to||'23:59').split(':').map(Number);
+const okDay=!(o.days||[]).length||o.days.includes(dt.getDay());
+const okTime=hm>=f[0]*60+(f[1]||0)&&hm<t[0]*60+(t[1]||0);
+const okDur=!(o.durations||[]).length||o.durations.includes(min);
+const okArea=!(o.areas||[]).length||o.areas.includes(area);
+if(okDay&&okTime&&okDur&&okArea)return {ok:true,why:''};
+return {ok:false,why:'it applies '+offerText(o)+'.'};
+}
+const draftLabel=d=>AREAS[d.area].label+' \u00B7 '+fmtMin(d.min)+' \u00B7 '+(d.socks==='No socks'?'No socks':'Socks '+d.socks)+' \u00B7 '+(d.ctype==='new'?'New':'Existing');
+function renderQuick(){
+const el=$('#quickBar');if(!el)return;
+const ds=me?getDrafts().filter(d=>d&&AREAS[d.area]):[];
+el.hidden=!ds.length;
+el.innerHTML=ds.length?'<span class="qlbl">Quick entry:</span>'+ds.map((d,i)=>`<button type="button" data-q="${i}">${esc(draftLabel(d))}</button>`).join(''):'';
+}
 function pricingVersions(){
 const v=priceRows.filter(r=>/^v_/.test(r.id)&&r.data&&typeof r.data.effectiveFrom==='number').map(r=>Object.assign({_id:r.id},r.data)).sort((a,b)=>a.effectiveFrom-b.effectiveFrom);
 if(v.length)return v;
@@ -142,12 +174,12 @@ let all=[],from=0;
 for(;;){const rows=await ok(make().range(from,from+PAGE-1));all=all.concat(rows||[]);if(!rows||rows.length<PAGE)break;from+=PAGE}
 return all;
 }
-const GMAP={baseMin:'base_min',durationMin:'duration_min',startAt:'start_at',endedAt:'ended_at',cancelledAt:'cancelled_at',cancelReason:'cancel_reason',by:'by_name',outBy:'out_by',editedBy:'edited_by',editedAt:'edited_at'};
+const GMAP={baseMin:'base_min',durationMin:'duration_min',startAt:'start_at',endedAt:'ended_at',cancelledAt:'cancelled_at',cancelReason:'cancel_reason',by:'by_name',outBy:'out_by',editedBy:'edited_by',editedAt:'edited_at',pausedAt:'paused_at',pausedMs:'paused_ms'};
 const GREV={};Object.keys(GMAP).forEach(k=>{GREV[GMAP[k]]=k});
 const toRowG=o=>{const r={};Object.keys(o).forEach(k=>{if(o[k]!==undefined)r[GMAP[k]||k]=o[k]});return r};
 const fromRowG=r=>{
 const o={};Object.keys(r).forEach(k=>{o[GREV[k]||k]=r[k]});
-['ticket','players','baseMin','durationMin','startAt','endedAt','cancelledAt','editedAt'].forEach(k=>{if(o[k]!=null)o[k]=Number(o[k])});
+['ticket','players','baseMin','durationMin','startAt','endedAt','cancelledAt','editedAt','pausedAt','pausedMs'].forEach(k=>{if(o[k]!=null)o[k]=Number(o[k])});
 return o;
 };
 const BMAP={startAt:'start_at',discType:'disc_type',discVal:'disc_val',paidAmount:'paid_amount',cardAmt:'card_amt',paidAt:'paid_at',paidBy:'paid_by',extTotal:'ext_total',extList:'ext_list'};
@@ -270,7 +302,7 @@ if(o.startAt!==undefined)row.start_at=o.startAt;
 await ok(client.from('contacts').upsert(row,{onConflict:'id'}));
 },
 createBilling:async(id,o)=>{
-await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,paid:!!o.paid,pay_method:o.payMethod||'cash',cash_amt:o.cashAmt,upi_amt:o.upiAmt,paid_by:o.paidBy}}));
+await ok(client.rpc('billing_create',{p:{id,start_at:o.startAt,play:o.play,socks:o.socks,card:o.card,discount:o.discount,disc_type:o.discType,disc_val:o.discVal,total:o.total,paid:!!o.paid,pay_method:o.payMethod||'cash',cash_amt:o.cashAmt,upi_amt:o.upiAmt,offer:o.offer,paid_by:o.paidBy}}));
 },
 setBilling:async(id,o)=>{await ok(client.from('billing').upsert(Object.assign({id},toBill(o)),{onConflict:'id'}))},
 addExtBilling:async(id,price,min)=>{await ok(client.rpc('billing_add_ext',{p_id:id,p_price:price,p_min:min}))},
@@ -553,13 +585,13 @@ if(s.bday)facts.push('<span class="fact hl">Birthday free play</span>');
 const pi=payInfo(s);
 if(pi)facts.push(`<span class="fact pay-${pi.status}">${STATUS_LABEL[pi.status]}${pi.status!=='paid'?' \u00B7 Due '+esc(money(pi.due)):(isAdmin()&&methodOf(s)?' \u00B7 '+esc(methodOf(s)):'')}</span>`);
 const ph=phoneOf(s);
-return `<article class="guest" data-id="${esc(s.id)}" data-area="${esc(s.area)}" data-start="${s.startAt}" data-end="${endOf(s)}" data-state="ok">
+return `<article class="guest" data-id="${esc(s.id)}" data-area="${esc(s.area)}" data-start="${s.startAt}" data-end="${endOf(s)}" data-dur="${s.durationMin}" data-frozen="${s.pausedAt?Math.round((s.startAt+s.durationMin*60000+(s.pausedMs||0)-s.pausedAt)/1000):''}" data-state="ok">
 <div class="g-top"><div><span class="areatag">${esc(AREAS[s.area].label)}</span><h3>${esc(s.name)}</h3>
 <p class="meta"><span class="stw">${s.startAt>Date.now()?'Starts':'In'}</span> at ${esc(clockStr(s.startAt))} \u00B7 ${esc(fmtMin(s.durationMin))} booked${ph?' \u00B7 '+esc(ph):''}</p></div><span class="badge">Playing</span></div>
 <div class="timer">--:--</div><div class="track"><span></span></div>
 <div class="facts">${facts.join('')}</div>
 ${s.remark?`<p class="remark">\u201C${esc(s.remark)}\u201D</p>`:''}
-<div class="g-actions"><button class="btn ghost" data-act="extend" data-write>Add time</button><button class="btn ghost" data-act="edit" data-write>Edit</button><button class="btn ghost" data-act="pay" data-write>Payment</button><button class="btn ghost" data-act="cancel" data-write>Cancel</button><button class="btn primary" data-act="out" data-write>Mark out</button></div></article>`;
+<div class="g-actions">${s.pausedAt?'<button class="btn ghost" data-act="resume" data-write>Resume</button>':(isOver(s)||s.startAt>Date.now()?'':'<button class="btn ghost" data-act="pause" data-write>Pause</button>')}<button class="btn ghost" data-act="extend" data-write>Add time</button><button class="btn ghost" data-act="edit" data-write>Edit</button><button class="btn ghost" data-act="pay" data-write>Payment</button><button class="btn ghost" data-act="cancel" data-write>Cancel</button><button class="btn primary" data-act="out" data-write>Mark out</button></div></article>`;
 }
 const cp=(title,rows)=>`<div class="cp"><h3>${esc(title)}</h3>${rows.map(r=>`<div class="row"><span>${esc(r[0])}</span><span><b>${r[1]}</b>${r[2]?`<i>${esc(r[2])}</i>`:''}</span></div>`).join('')}</div>`;
 function renderDash(){
@@ -596,10 +628,18 @@ function renderOver(){
 const list=overdueList(Date.now()),box=$('#overGuests');
 box.innerHTML=list.length?list.map(cardHTML).join(''):'<div class="empty"><strong>No overtime guests</strong>When a timer reaches zero, the guest shows up here until they are marked out.</div>';
 }
+function doPause(id){
+const s=getS(id);if(!s||!canWrite()||s.pausedAt)return;
+B.patchGuest(id,{pausedAt:Date.now()}).catch(writeErr);toast(s.name+' paused. The timer is stopped.');
+}
+function doResume(id){
+const s=getS(id);if(!s||!canWrite()||!s.pausedAt)return;const now=Date.now();
+B.patchGuest(id,{pausedAt:null,pausedMs:(s.pausedMs||0)+(now-s.pausedAt)}).catch(writeErr);toast(s.name+' resumed. The timer is running.');
+}
 function cardClick(e){
 const b=e.target.closest('[data-act]');if(!b||!me)return;
 const id=b.closest('.guest').dataset.id,a=b.dataset.act;
-if(a==='extend')openExtend(id);else if(a==='cancel')openCancel(id);else if(a==='edit')openEdit(id);else if(a==='pay')openPayment(id);else openOut(id);
+if(a==='pause')doPause(id);else if(a==='resume')doResume(id);else if(a==='extend')openExtend(id);else if(a==='cancel')openCancel(id);else if(a==='edit')openEdit(id);else if(a==='pay')openPayment(id);else openOut(id);
 }
 $('#guests').addEventListener('click',cardClick);
 $('#overGuests').addEventListener('click',cardClick);
@@ -612,6 +652,14 @@ $('#clock').textContent=new Date(now).toLocaleTimeString([], {hour:'numeric',min
 const sig=overdueList(now).map(s=>s.id+':'+endOf(s)).join('|');
 if(sig!==lastOverSig){lastOverSig=sig;renderAll();return}
 $$('.guest').forEach(el=>{
+const fz=el.dataset.frozen;
+if(fz!==''&&fz!==undefined){
+const frem=+fz,fdur=(+el.dataset.dur)*60;
+if(el.dataset.state!=='ok')el.dataset.state='ok';
+$('.badge',el).textContent='Paused';$('.timer',el).textContent=fmtHMS(frem);
+$('.track span',el).style.width=Math.min(100,Math.max(0,(fdur-frem)/fdur*100))+'%';
+return;
+}
 const st=+el.dataset.start,en=+el.dataset.end,waiting=now<st;
 const rem=waiting?Math.round((en-st)/1000):Math.round((en-now)/1000);
 const state=waiting?'ok':(rem<=0?'over':rem<=settings.warnMin*60?'soon':'ok');
@@ -638,7 +686,7 @@ const line=rem>=0?'They still have '+fmtHMS(rem)+' left.':'They are over time by
 openDlg(`<h2>Mark out ${esc(s.name)}?</h2><p class="sub-line">${esc(line)} Time used: ${esc(fmtMin((now-s.startAt)/60000))} of ${esc(fmtMin(s.durationMin))}. They will move to Completed.</p>
 <div class="dlg-actions"><button class="btn ghost" id="oNo">Keep playing</button><button class="btn primary" id="oOk">Mark out</button></div>`);
 $('#oNo').onclick=closeDlg;
-$('#oOk').onclick=()=>{B.patchGuest(id,{status:'completed',endedAt:Date.now(),outBy:me.name}).catch(writeErr);closeDlg();toast(s.name+' marked out.')};
+$('#oOk').onclick=()=>{const t=Date.now();B.patchGuest(id,Object.assign({status:'completed',endedAt:t,outBy:me.name},s.pausedAt?{pausedAt:null,pausedMs:(s.pausedMs||0)+(t-s.pausedAt)}:{})).catch(writeErr);closeDlg();toast(s.name+' marked out.')};
 }
 function openCancel(id){
 const s=getS(id);if(!s||!canWrite())return;
@@ -817,14 +865,19 @@ socks:g.socks,remark:g.remark,baseMin:g.min,durationMin:g.min,startAt:now,extens
 B.createGuest(guest).then(()=>{
 if(g.phone)B.saveContact(id,{phone:g.phone,startAt:now}).catch(()=>{});
 B.createBilling(id,{startAt:now,play:b.play,socks:b.sock,card:b.card,discount:b.discount,discType:dc.t,discVal:dc.v,total:b.total,
-paid:!!g.paid,payMethod:g.payMethod||'cash',cashAmt:g.cashAmt,upiAmt:g.upiAmt,paidBy:me.name}).catch(writeErr);
+paid:!!g.paid,payMethod:g.payMethod||'cash',cashAmt:g.cashAmt,upiAmt:g.upiAmt,offer:g.offer,paidBy:me.name}).catch(writeErr);
 }).catch(writeErr);
 return guest;
 }
+function offerBlock(){
+const os=activeOffers();if(!os.length)return '';
+return `<div class="lbl">Offer</div>${chipRow('offer',['none'].concat(os.map(o=>o.id)),v=>v==='none'?'No offer':(os.find(o=>o.id===v)||{}).name||v)}<p class="hintline" id="offerNote"></p><label class="check" id="idWrap" hidden><input type="checkbox" id="eIdSeen"><span>ID card seen and checked</span></label>`;
+}
 const chipRow=(key,items,fmt)=>`<div class="chips">${items.map(v=>`<button type="button" class="chip" data-k="${key}" data-v="${esc(v)}">${esc(fmt?fmt(v):v)}</button>`).join('')}</div>`;
-function openEntry(){
+function openEntry(preset){
 if(!canWrite())return;
-entry={area:lastArea,ctype:'new',min:60,card:'Basic',bday:false,socks:'No socks',disc:'none',pay:'pending',players:1,startTouched:false};
+entry={area:lastArea,ctype:'new',min:60,card:'Basic',bday:false,socks:'No socks',disc:'none',pay:'pending',players:1,startTouched:false,offer:'none'};
+if(preset&&preset.area)Object.assign(entry,{area:preset.area,min:preset.min||60,socks:preset.socks||'No socks',card:preset.card||'Basic',ctype:preset.ctype||'new'});
 $('#entryBody').innerHTML=`
 <div class="dlg-head"><h2>New check-in</h2><button class="xbtn" data-close aria-label="Close">\u2715</button></div>
 <div class="lbl">Play area</div><div class="atiles">
@@ -842,7 +895,7 @@ $('#entryBody').innerHTML=`
 <div class="lbl" id="cardLbl">Card type</div>${chipRow('card',CARDS)}
 <div id="bdayWrap" hidden><div class="lbl">Birthday free play (one player plays free)</div>${chipRow('bday',['no','yes'],v=>v==='yes'?'Yes':'No')}</div>
 <div class="lbl">Socks size</div>${chipRow('socks',SOCKS)}
-<div><div class="lbl">Discount (on play time only)</div>${chipRow('disc',['none',5,10,15,20,'custom'],v=>v==='none'?'No discount':v==='custom'?'Custom':v+'%')}
+${offerBlock()}<div><div class="lbl">Discount (on play time only)</div>${chipRow('disc',['none',5,10,15,20,'custom'],v=>v==='none'?'No discount':v==='custom'?'Custom':v+'%')}
 <div class="two" id="dcWrap" hidden><label class="field"><span>Custom discount</span><input id="dcVal" type="number" min="0" step="1" value="0" inputmode="decimal"></label>
 <label class="field"><span>Type</span><select id="dcType"><option value="pct">Percent (%)</option><option value="amt">Amount (${esc(settings.currency)})</option></select></label></div></div>
 <label class="field"><span>Remark (optional)</span><textarea id="eRem" maxlength="160" placeholder="Wristband number, party, allergies..."></textarea></label>
@@ -855,12 +908,16 @@ const nm=customers();
 $('#nameList').innerHTML=Object.keys(nm).slice(0,400).map(k=>`<option value="${esc(nm[k].name)}"></option>`).join('');
 edlg.showModal();syncEntry();
 $('#eStart').value=toLocalInput(Date.now());
-clearInterval(entryClock);entryClock=setInterval(()=>{if(entry&&!entry.startTouched&&edlg.open&&$('#eStart'))$('#eStart').value=toLocalInput(Date.now())},15000);
+clearInterval(entryClock);entryClock=setInterval(()=>{if(entry&&!entry.startTouched&&edlg.open&&$('#eStart')){$('#eStart').value=toLocalInput(Date.now());syncEntry()}},15000);
 setTimeout(()=>{try{$('#eName').focus()}catch(e){}},50);
 }
 const entryPr=()=>pricesAt(entry&&entry.startTouched?(new Date($('#eStart').value).getTime()||Date.now()):Date.now());
 const entryMin=()=>entry.min==='custom'?(parseInt($('#eMin').value,10)||0):entry.min;
+const entryStart=()=>entry&&entry.startTouched?(new Date($('#eStart').value).getTime()||Date.now()):Date.now();
+const curOffer=()=>entry.offer&&entry.offer!=='none'?getOffers().find(x=>x.id===entry.offer):null;
 function entryDisc(){
+const o=curOffer();
+if(o){const r=offerOk(o,entryStart(),entry.area,entryMin());return r.ok?{t:'pct',v:Number(o.pct)||0}:{t:'none',v:0}}
 if(entry.disc==='none')return {t:'none',v:0};
 if(entry.disc==='custom')return {t:$('#dcType').value==='amt'?'amt':'pct',v:num($('#dcVal').value)};
 return {t:'pct',v:Number(entry.disc)};
@@ -871,6 +928,12 @@ $$('#entryBody [data-k]').forEach(b=>{
 let cur=entry[b.dataset.k];if(b.dataset.k==='bday')cur=cur?'yes':'no';
 b.setAttribute('aria-pressed',String(String(cur)===b.dataset.v));
 });
+const on=$('#offerNote');
+if(on){
+const o=curOffer();
+if(!o){on.textContent='';$('#idWrap').hidden=true}
+else{const r=offerOk(o,entryStart(),entry.area,entryMin());on.textContent=r.ok?o.name+': '+o.pct+'% off play time applied.':'Not valid for this check-in: '+r.why;on.style.color=r.ok?'var(--ok)':'var(--over)';$('#idWrap').hidden=!(r.ok&&o.needId)}
+}
 $('#bdayWrap').hidden=entry.card!=='Premium';
 $('#eCustomWrap').hidden=entry.min!=='custom';
 $('#partWrap').hidden=entry.pay!=='part';
@@ -894,11 +957,12 @@ edlg.addEventListener('close',()=>{clearInterval(entryClock)});
 edlg.addEventListener('click',e=>{
 if(e.target.closest('[data-close]')){edlg.close();return}
 const stb=e.target.closest('[data-st]');
-if(stb){const n=Number(stb.dataset.st);$('#eStart').value=toLocalInput(Date.now()+n*60000);entry.startTouched=n>0;return}
+if(stb){const n=Number(stb.dataset.st);$('#eStart').value=toLocalInput(Date.now()+n*60000);entry.startTouched=n>0;syncEntry();return}
 const k=e.target.closest('[data-k]');
 if(k){const key=k.dataset.k,v=k.dataset.v;
 if(key==='min')entry.min=v==='custom'?'custom':Number(v);
-else if(key==='disc')entry.disc=(v==='none'||v==='custom')?v:Number(v);
+else if(key==='disc'){entry.disc=(v==='none'||v==='custom')?v:Number(v);if(entry.disc!=='none')entry.offer='none'}
+else if(key==='offer'){entry.offer=v;if(v!=='none')entry.disc='none'}
 else if(key==='bday')entry.bday=v==='yes';
 else entry[key]=v;
 if(key==='area')lastArea=v;
@@ -908,7 +972,7 @@ if(e.target.id==='eGo')startGuest();
 });
 edlg.addEventListener('input',e=>{
 const id=e.target.id;
-if(id==='eStart'){entry.startTouched=true;return}
+if(id==='eStart'){entry.startTouched=true;syncEntry();return}
 if(id==='eName'){nameHint(true)}
 else syncEntry();
 });
@@ -937,6 +1001,14 @@ startAt=new Date($('#eStart').value).getTime();
 if(!startAt){toast('Enter a valid check-in time.',true);return}
 if(Math.abs(startAt-Date.now())>24*3600000){toast('The check-in time must be within 24 hours of now. Check the date.',true);return}
 }
+const wantWa=!!($('#eWa')&&$('#eWa').checked);
+if(wantWa&&!$('#ePhone').value.trim()){toast('Enter the phone number to send a WhatsApp reminder.',true);return}
+const off=curOffer();
+if(off){
+const orr=offerOk(off,startAt,entry.area,min);
+if(!orr.ok){toast(off.name+' is not valid for this check-in: '+orr.why,true);return}
+if(off.needId&&!$('#eIdSeen').checked){toast('Tick "ID card seen and checked" to give the '+off.name+'.',true);return}
+}
 const part=entry.pay==='part';let pc=0,pu=0;
 if(part){
 pc=num($('#ePartCash').value);pu=num($('#ePartUpi').value);
@@ -944,7 +1016,7 @@ if(pc+pu<=0){toast('Enter the cash or UPI amount received, or choose Pending.',t
 if(pc+pu>calcBill(entry,min,dc,entryPr()).total){toast('The amount received is more than the bill.',true);return}
 }
 const g=commitGuest({area:entry.area,name,phone:$('#ePhone').value.trim(),players:entry.players,ctype:entry.ctype,card:entry.card,bday:entry.bday,
-socks:entry.socks,remark:$('#eRem').value.trim(),min,discType:dc.t,discVal:dc.v,
+socks:entry.socks,remark:$('#eRem').value.trim(),min,discType:dc.t,discVal:dc.v,offer:off?off.name:undefined,wa:wantWa,
 paid:entry.pay==='cash'||entry.pay==='upi',payMethod:entry.pay==='upi'?'upi':'cash',cashAmt:part?pc:undefined,upiAmt:part?pu:undefined},nextTicket(0),startAt);
 edlg.close();
 toast(`${name} checked in: ${AREAS[g.area].label}, ${fmtMin(min)}.`+(startAt>Date.now()+60000?' Starts at '+clockStr(startAt)+'.':''));
@@ -1096,7 +1168,7 @@ $('#recTitle').textContent=TITLES[tab]||'Customers';
 const rows=records(),now=Date.now(),adm=isAdmin(),cols=adm?17:me?14:12;
 $('#rBody').innerHTML=rows.length?rows.map(s=>{
 const extra=sum(s.extensions,x=>x.min);let tag,out;
-if(s.status==='active'){const o=endOf(s)<=now;tag=`<span class="tag ${o?'up':'play'}">${o?'Time\u2019s up':'Playing'}</span>`;out='Playing'}
+if(s.status==='active'){const o=endOf(s)<=now;tag=`<span class="tag ${o?'up':s.pausedAt?'nw':'play'}">${o?'Time\u2019s up':s.pausedAt?'Paused':'Playing'}</span>`;out='Playing'}
 else if(s.status==='completed'){tag='<span class="tag done">Completed</span>';out=clockStr(s.endedAt||s.startAt)}
 else{tag='<span class="tag cancel">Cancelled</span>';out=clockStr(s.cancelledAt||s.startAt)}
 const i=esc(s.id),canc=s.status==='cancelled';
@@ -1336,6 +1408,7 @@ $('#nHistory').textContent=sessions.length;
 }
 function renderAll(){
 if(!appReady)return;
+renderQuick();
 $('#todayLine').textContent=(me?'Guest tracker':'Live view')+' \u00B7 '+new Date().toLocaleDateString([], {weekday:'long',day:'numeric',month:'long'});
 renderCounts();
 if(tab==='dash')renderDash();
@@ -1360,6 +1433,7 @@ if(t==='settings')renderSettings();
 renderAll();
 }
 $('#tabs').addEventListener('click',e=>{const b=e.target.closest('[data-tab]');if(b)switchTab(b.dataset.tab)});
+$('#quickBar').addEventListener('click',e=>{const b=e.target.closest('[data-q]');if(!b||!canWrite())return;openEntry(getDrafts().filter(d=>d&&AREAS[d.area])[+b.dataset.q])});
 (async function boot(){
 $$('img.logo').forEach(i=>{i.src=LOGO});
 soundOn=lsGet('ufh4_sound')!=='0';syncSound();syncNotifBtn();
