@@ -238,6 +238,38 @@ dialog.xwide{width:min(1000px,calc(100% - 24px))}
 .quickbar .qlbl{font-size:13px;color:var(--muted);font-weight:600}
 .quickbar button{background:var(--surface);border:1.5px solid var(--cyan);color:var(--ink);border-radius:999px;padding:9px 14px;font:600 14px var(--body);cursor:pointer}
 .quickbar button:hover{background:var(--surface-2)}
+.wabar{display:flex;flex-direction:column;gap:8px;margin:0 0 14px}
+.wabar .wa-item{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;background:#E8FBF1;border:1.5px solid var(--ok);border-radius:14px;padding:10px 14px}
+.wabar .wa-item b{color:#0A6B47}
+.wabar .wa-btns{display:flex;gap:8px}
+.hintline{font-size:13px;margin:0 0 10px;min-height:0}
+.offercard{border:1.5px solid var(--line);border-radius:16px;padding:14px;margin:0 0 12px;background:var(--bg)}
+.offercard .oc-h{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:10px}
+.draftrow{display:grid;grid-template-columns:repeat(5,1fr) auto;gap:8px;align-items:end;margin:0 0 10px}
+@media(max-width:760px){.draftrow{grid-template-columns:1fr 1fr}}
+.selbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px;padding:10px 14px;border:1.5px solid var(--cyan);border-radius:14px;background:var(--surface)}
+.selbar span{font-weight:700}
+#printArea{display:none}
+@media print{
+body.printing>*:not(#printArea){display:none!important}
+body.printing{background:#fff!important}
+body.printing #printArea{display:block!important;color:#111;font-family:Arial,Helvetica,sans-serif}
+.inv{page-break-after:always;padding:6mm 4mm}
+.inv:last-child{page-break-after:auto}
+.inv .ih{display:flex;justify-content:space-between;gap:16px;border-bottom:2px solid #111;padding-bottom:10px;margin-bottom:14px}
+.inv .ih img{width:64px;height:64px;border-radius:12px;object-fit:cover;float:left;margin-right:12px}
+.inv h1{font-size:22px;margin:0 0 4px}
+.inv p{margin:2px 0;font-size:13px}
+.inv table{width:100%;border-collapse:collapse;margin-top:14px}
+.inv th,.inv td{border-bottom:1px solid #ccc;padding:8px 6px;text-align:left;font-size:14px}
+.inv td.n,.inv th.n{text-align:right}
+.inv tr.t td{font-weight:700;border-top:2px solid #111}
+.inv .stamp{display:inline-block;border:2px solid #111;padding:2px 10px;font-weight:700;border-radius:6px;margin-top:10px}
+.inv .ft{margin-top:22px;font-size:12px;color:#444}
+.slip{width:72mm;border:1px dashed #333;padding:4mm;margin:0 0 4mm;page-break-inside:avoid;font-size:13px}
+.slip .sl-h{font-weight:700;font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+.slip .sl-n{font-size:20px;font-weight:700;margin:4px 0}
+}
 </style>
 </head>
 <body>
@@ -264,6 +296,7 @@ dialog.xwide{width:min(1000px,calc(100% - 24px))}
 <div class="rule"></div>
 <div class="banner" id="banner" hidden></div>
 <div class="alerts" id="alerts" aria-live="assertive"></div>
+<div class="wabar" id="waBar" hidden></div>
 <nav role="tablist" aria-label="Pages" id="tabs">
 <button role="tab" data-tab="dash" aria-selected="true">Dashboard <span class="n" id="nDash">0</span></button>
 <button role="tab" data-tab="over" aria-selected="false">Overtime <span class="n" id="nOver">0</span></button>
@@ -293,8 +326,9 @@ dialog.xwide{width:min(1000px,calc(100% - 24px))}
 <h2 class="sec-title" id="recTitle">Completed</h2>
 <div id="recFilters"></div>
 <div class="toolbar"><span class="hint" id="rCount" style="margin:0"></span><button class="btn ghost sp" id="csvBtn">Export CSV</button></div>
+<div class="selbar stf" id="selBar" hidden><span id="selCount"></span><button class="btn ghost" id="slipBtn" type="button">Print wristband slips</button><button class="btn primary adm" id="invBtn" type="button">Create invoice</button><button class="btn ghost" id="selClear" type="button">Clear selection</button></div>
 <div class="scroll"><table>
-<thead><tr><th>Ticket</th><th>Customer</th><th>Area</th><th class="num">Players</th><th>Type</th><th>Card</th><th>Socks</th><th>Birthday</th><th class="num">Time</th><th>In / Out</th><th class="num adm">Bill amount</th><th class="adm">Paid by</th><th class="num stf">Amount due</th><th class="stf">Payment</th><th>Status</th><th class="adm">Staff</th><th></th></tr></thead>
+<thead><tr><th class="stf"><input type="checkbox" id="selAll" aria-label="Select all"></th><th>Ticket</th><th>Customer</th><th>Area</th><th class="num">Players</th><th>Type</th><th>Card</th><th>Socks</th><th>Birthday</th><th class="num">Time</th><th>In / Out</th><th class="num adm">Bill amount</th><th class="adm">Paid by</th><th class="num stf">Amount due</th><th class="stf">Payment</th><th>Status</th><th class="adm">Staff</th><th></th></tr></thead>
 <tbody id="rBody"></tbody>
 </table></div>
 </section>
@@ -387,6 +421,20 @@ dialog.xwide{width:min(1000px,calc(100% - 24px))}
 </div>
 </fieldset>
 </div>
+<div class="panel" style="max-width:860px;margin-top:16px"><h2>Offers</h2>
+<p class="hint" style="margin:0 0 12px">Each offer gives a percentage off play time only (never socks or the card price). At check-in staff choose the offer; it applies by itself when the day, time, time length and play area match, and the form says why when it does not. You can add, change or switch off offers at any time. Offers do not change entries already saved.</p>
+<div id="offerEditor"></div>
+<div class="acts" style="margin-top:10px"><button class="btn ghost" id="offerAdd" type="button">+ Add offer</button><button class="btn primary" id="offerSave" type="button">Save offers</button></div></div>
+<div class="panel" style="max-width:860px;margin-top:16px"><h2>Quick-entry shortcuts</h2>
+<p class="hint" style="margin:0 0 12px">One-tap buttons on the dashboard. Staff tap a shortcut, then enter only the name and payment type.</p>
+<div id="draftEditor"></div>
+<div class="acts" style="margin-top:10px"><button class="btn ghost" id="draftAdd" type="button">+ Add shortcut</button><button class="btn primary" id="draftSave" type="button">Save shortcuts</button></div></div>
+<div class="panel" style="max-width:860px;margin-top:16px"><h2>Business details and WhatsApp message</h2>
+<p class="hint" style="margin:0 0 12px">Shown on invoices. The WhatsApp message is prefilled when staff send a reminder. Use {name}, {mins} and {time} in the message.</p>
+<label class="field"><span>Address</span><input id="sAddr" maxlength="120"></label>
+<div class="two"><label class="field"><span>Phone number</span><input id="sPhone" maxlength="30" inputmode="tel"></label><label class="field"><span>GST number (optional)</span><input id="sGst" maxlength="30"></label></div>
+<label class="field"><span>WhatsApp reminder message</span><textarea id="sWaText" rows="3" maxlength="300"></textarea></label>
+<div class="acts"><button class="btn primary" id="bizSave" type="button">Save business details</button></div></div>
 <div class="panel" style="max-width:860px;margin-top:16px"><h2>Price history</h2><div class="lines" id="priceHistory"></div></div>
 </section>
 </div>
@@ -397,5 +445,6 @@ dialog.xwide{width:min(1000px,calc(100% - 24px))}
 <div id="toasts" role="status" aria-live="polite"></div>
 <noscript><p style="padding:20px">This page needs JavaScript turned on.</p></noscript>
 <script type="module" src="app.js"></script>
+<div id="printArea" aria-hidden="true"></div>
 </body>
 </html>
